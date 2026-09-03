@@ -48,6 +48,16 @@ export namespace SecurityRules {
     "agent_manager_models",
   ])
 
+  /** True when a network command's arguments name a loopback / local destination (any spelling). */
+  export function local(argv: string[]): boolean {
+    return argv
+      .map(CommandSemantics.dequote)
+      .some(
+        (arg) =>
+          LOOPBACK.test(arg) || UNIX_SOCKET.test(arg) || /^(localhost|127(\.\d{1,3}){1,3}|0\.0\.0\.0|::1)$/i.test(arg),
+      )
+  }
+
   function hard(
     rule: string,
     action: SecurityEvidence["action"],
@@ -706,10 +716,7 @@ export namespace SecurityRules {
 
     if (process.network && !process.pkg && !process.git && process.family !== "container") {
       const args = process.argv.map(CommandSemantics.dequote)
-      const local = args.some(
-        (arg) =>
-          LOOPBACK.test(arg) || UNIX_SOCKET.test(arg) || /^(localhost|127(\.\d{1,3}){1,3}|0\.0\.0\.0|::1)$/i.test(arg),
-      )
+      const local = SecurityRules.local(process.argv)
       const route = args.some((arg) => KILO_ROUTES.test(arg))
       const raw = RAW_SOCKET.has(process.executable ?? "")
       if (route && local)

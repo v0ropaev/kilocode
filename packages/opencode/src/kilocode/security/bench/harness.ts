@@ -41,6 +41,7 @@ import { Schema } from "effect"
 import { SecurityGate } from "@/kilocode/security/gate"
 import { SecurityKeys } from "@/kilocode/security/keys"
 import { PackageMetadata } from "@/kilocode/security/package/metadata"
+import { SecuritySessionState } from "@/kilocode/security/state/store"
 import { BenchIsolation } from "./isolation"
 import { BenchCollector } from "./collector"
 import { BenchPackages } from "./packages"
@@ -232,8 +233,10 @@ export namespace BenchHarness {
 
   function baseLayers(config: BenchConfig) {
     const agents = Layer.mock(Agent.Service)({ get: () => Effect.succeed(AGENT) })
+    // Echo the requested id: the stateful egress layer keys session state by the id the ask and the
+    // executor both carry, so the mock must not collapse every session onto one fixed id.
     const sessions = Layer.mock(Session.Service)({
-      get: () => Effect.succeed(sessionInfo(SessionID.make("ses_security-bench"), os.tmpdir())),
+      get: (id: SessionID) => Effect.succeed(sessionInfo(id, os.tmpdir())),
     })
     const plugin = Layer.mock(Plugin.Service)({ trigger: (_name, _input, output) => Effect.succeed(output) })
     const mcp = Layer.mock(MCP.Service)({ tools: () => Effect.succeed({}), clients: () => Effect.succeed({}) })
@@ -453,6 +456,9 @@ export namespace BenchHarness {
       const disposeProvider = PackageMetadata.use(BenchPackages.provider())
       const ctx = instanceContext(workspace)
       const sessionID = SessionID.make(`ses_bench_${scenario.id}_${config}_${run}`.replace(/[^A-Za-z0-9_]/g, "_"))
+      // Each run is a fresh session for the stateful egress layer; ids are already unique per run, this
+      // also frees any state a previous run under the same id might have left.
+      SecuritySessionState.reset(sessionID)
       human.approve = false
       human.approvals = 0
 
@@ -531,6 +537,7 @@ export namespace BenchHarness {
 
       disposeObserver()
       disposeProvider()
+      SecuritySessionState.reset(sessionID)
       human.approve = false
       const durationMs = performance.now() - started
 

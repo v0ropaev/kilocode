@@ -13,9 +13,18 @@ Code map verified against commit `f062b0737eb6969644ab3fea7b391b8049401e4a` (202
 - Global config (`~/.config/kilo/kilo.json` or `opencode.json`): `{ "experimental": { "security_auto": true } }`
 - or the environment variable `KILO_SECURITY_AUTO=1` (`0` / `false` forces it off).
 
-Project configuration is ignored on purpose: a repository must not be able to switch the mode. The
-global config directory itself is protected by the engine's hard rules, so the agent cannot switch it
-either. The existing `--auto` / allow-everything semantics are untouched when the flag is off.
+Two additional evaluation layers (v2) are on whenever the mode is on and can be switched off
+individually, global config or environment only:
+
+| Layer | Config key | Env | Default |
+|---|---|---|---|
+| Package provenance preflight | `experimental.security_auto_packages` | `KILO_SECURITY_AUTO_PACKAGES` | on |
+| Stateful secret-egress protection | `experimental.security_auto_egress` | `KILO_SECURITY_AUTO_EGRESS` | on |
+
+Project configuration is ignored on purpose: a repository must not be able to switch the mode or its
+layers. The global config directory itself is protected by the engine's hard rules, so the agent
+cannot switch it either. The existing `--auto` / allow-everything semantics are untouched when the flag
+is off.
 
 ## Execution flow (as implemented in Kilo today)
 
@@ -125,6 +134,63 @@ non-destructive mutations, project scripts (`npm test`, `make`, `python script.p
 Package installs, fetch-and-execute (`npx`), outbound network tools, interpreter inline code, writes
 outside the workspace, unrecognised git subcommands and unclassified tools are soft ASK.
 
+## Security Auto layers
+
+Two evaluation layers run after the v1 rules and hand structured evidence to the same monotonic
+reducer, so they can only *tighten* a decision — a deterministic v1 DENY / hard ASK is never weakened,
+and their own failures fail safe (a hard ASK, never ALLOW). Each is independently switchable (see
+[Enabling](#enabling)).
+
+### Package provenance preflight (`security_auto_packages`)
+
+A recognised package operation is evaluated against registry metadata *before* the package manager
+runs, so an unvetted package's install-time scripts never execute first.
+`packages/opencode/src/kilocode/security/package/`.
+
+- **What is recognised** (read from the already-normalised command, wrappers and nested `bash -c`
+  included — not a second parser): npm/pnpm/yarn/bun installs, `npm ci` / `clean-install` (manifest
+  installs that run every dependency's scripts, so treated as installs, not project scripts), and
+  `npx` / `npm exec` / `pnpm dlx` / `bunx` fetch-and-execute. Explicit vs manifest install, scoped
+  names, versions/ranges/tags, alias / git / url / file sources, `--registry` and
+  `npm_config_registry` overrides, and `--ignore-scripts` are distinguished.
+- **Signals** (an explainable set, never one opaque score): deterministic — package age, release age,
+  declared install scripts, repository presence, non-registry source, registry override (command line
+  or project `.npmrc`); heuristic — adoption (weekly downloads), name similarity to a well-known
+  package (edit distance / separator / affix / homoglyph / scope, each naming the look-alike);
+  uncertainty — registry metadata unavailable, package not found, ambiguous spec, unresolved range.
+- **Decision**: uncertainty never resolves to ALLOW (`metadata lookup failure ≠ trusted`); an unvetted
+  package whose code would run now (install scripts enabled, or `npx`) is a DENY; other suspicious
+  provenance is a hard ASK; an established, adopted package keeps the base soft ASK. Manifest installs
+  assess the direct dependencies. Registry metadata comes through a mockable provider (deterministic
+  fixtures for tests / the benchmark; an optional live npm adapter with a timeout, size cap and cache).
+- Honest guarantee: *suspicious provenance is evaluated before local execution*. It does not detect
+  arbitrary zero-days, and does not make later execution of imported malicious code safe. Ecosystems
+  other than npm/pnpm/yarn/bun keep the base soft ask.
+
+### Stateful sensitive-read → egress protection (`security_auto_egress`)
+
+A lightweight per-session state closes the class where individual steps look allowable but the
+sequence is exfiltration (`read secret → copy → outbound`). `packages/opencode/src/kilocode/security/state/`.
+
+- **State** (per root session, so a sub-agent read is visible to its parent; never shared between
+  unrelated sessions; swept by TTL): sensitive resources whose contents were actually obtained (a read
+  that *executed* — a name in a denied request never counts), files tainted through a controlled
+  built-in flow (copy / move / redirect / a write carrying a tracked value), and salted digests of the
+  value-like tokens in those resources. It never stores raw secret values, and nothing is persisted or
+  logged. Observations are recorded against the tool call and committed only when it succeeds.
+- **Propagation** is limited to controlled flows visible in one command; it is *not* a taint engine.
+  Opaque subprocesses are out of reach by design — the OS sandbox's restricted egress remains the
+  stronger control there.
+- **Decision**: an ordinary outbound call with no secret context keeps the base network policy; a command
+  that both reads a credential and sends data out, an outbound action that reads a tainted/sensitive
+  file, or a literal secret value on an outbound command line is a DENY; an outbound action while the
+  session holds secret context, with no deterministic data link, is a hard ASK. Loopback destinations
+  are treated as egress (no 127.0.0.1 exception). Intent is not inferred: an agent-initiated and a
+  user-requested exfiltration are treated the same, because the engine cannot prove trusted provenance.
+- Honest guarantee: *a known sensitive read influences later outbound decisions in the same session.*
+  It does not track dataflow inside arbitrary programs, encoded/transformed values, or secrets the user
+  typed directly.
+
 ## Structured safe continuation
 
 A DENY inside a tool becomes a completed tool result titled "Blocked by security policy" whose
@@ -143,7 +209,13 @@ catches repeated identical attempts.
   canonicalised; unknown syntax never auto-allows (`shell.test.ts`, `path.test.ts`);
 - Kilo config / sandbox state writes are denied (`POLICY_TAMPERING`);
 - flag off leaves requests, rulesets and executor behaviour unchanged;
-- logs and metadata carry reason codes, rule ids and a command fingerprint, never command text or contents.
+- logs and metadata carry reason codes, rule ids and a command fingerprint, never command text or contents;
+- a recognised package install/exec is evaluated before the package manager runs; a metadata
+  lookup failure is a hard ASK, never ALLOW; layer evidence cannot weaken a deterministic DENY/hard ASK
+  (`test/kilocode/security/package.test.ts`);
+- a committed sensitive read updates session state and influences later outbound decisions; a
+  refused read does not; session state is isolated between sessions and holds no raw secret values; a
+  protected egress block happens before the outbound side effect (`test/kilocode/security/egress.test.ts`).
 
 ## Adversarial review
 
@@ -160,16 +232,34 @@ paths in PowerShell, .NET expression statements, wildcards inside directory segm
 `find -exec cat` over the home tree, `sort -o`, `git apply --unsafe-paths`, `tar -P`, raw sockets to
 localhost and additional autorun files (`~/.vimrc`, `~/.gdbinit`, fish `functions/`).
 
+The package and egress layers were reviewed the same way. Package review probed wrappers, `bash -c` and doubly-nested
+payloads, `;`/`&&`/subshell chaining, `npx`/`npm exec`/`pnpm dlx`/`bunx`, scoped and quoted names, pins
+and dist-tags, `--registry`/`npm_config_registry`/`.npmrc` overrides, git/url/tarball/file specs and
+bare-manifest installs — every recognised install of the days-old postinstall fixture is denied and
+every provenance variant at least asks. Egress review probed secret→temp→network, a two-hop copy,
+literal and base64 values, many benign steps between read and send, session reset, an untainted upload
+under secret context (a hard ASK, not a false DENY), and confirmed no raw value appears in a decision
+or the state snapshot. Confirmed residuals kept honest: opaque subprocess flow (`python upload.py
+secret`, unknown outbound tools) and encoded values are not statically contained, and pip/cargo/go are
+outside the npm-family package scope.
+
 ## Known limitations (not guaranteed by this slice)
 
 - Sandbox off is materially weaker: allowed workspace scripts (`npm run x`, `make`, `python script.py`)
   run with full host authority; the engine only decides whether an action may be attempted.
 - Interpreter inline code (`python -c`, `node -e`) is a soft ASK, not analysed.
-- Network policy is not modelled: `webfetch`, `websearch`, `curl` are soft ASK / existing rules;
-  MCP tools and custom tools are unclassified (existing rules decide); `notify_user`,
-  `background_process` restart/stop and `generate_image` upload perform effects without a
-  classifiable ask (pre-existing Kilo gaps).
-- No secret taint tracking across tool calls; no package reputation.
+- Network policy without secret context is unchanged: `webfetch`, `websearch`, an ordinary `curl` are
+  soft ASK / existing rules. MCP tools and custom tools remain unclassified (existing rules decide) —
+  an intentional residual class for the next milestone; `notify_user`, `background_process`
+  restart/stop and `generate_image` upload perform effects without a classifiable ask (pre-existing
+  Kilo gaps).
+- (egress) The egress layer sees only controlled built-in flows: an **opaque subprocess** that
+  reads a secret and sends it itself (`python upload.py secret`, an unknown outbound tool) is not
+  contained by static state — the OS sandbox is the control there; **encoded/transformed** values are
+  not value-matched (a same-session sensitive read still raises the context hard ASK); secrets the user
+  types directly are not labelled. The package layer covers **npm/pnpm/yarn/bun** only; pip / cargo /
+  go / system package managers keep their base handling. A **malicious but popular/established** package,
+  and malicious code that runs at import/build time rather than install time, are out of scope.
 - User agent-level config `ask` rules are tagged `agent` by Kilo and therefore liftable like built-in defaults.
 - `kilo run --auto` and TUI auto mode cannot answer a security hard ASK (it needs an interactive reply);
   the request stays pending, matching Kilo's existing skill-shell behaviour.
@@ -186,4 +276,5 @@ localhost and additional autorun files (`~/.vimrc`, `~/.gdbinit`, fish `function
 - Unrecognised commands are judged by their escaping operands only; an unknown tool writing to a
   workspace-relative path it names differently is not detected.
 - Prompt-file attachments and the subtask command path call `askPermission` without the gate (user-initiated).
-- The `experimental.security_auto` key must be mirrored in the cloud config schema (`apps/web/src/app/config.json/extras.ts`).
+- The `experimental.security_auto`, `security_auto_packages` and `security_auto_egress` keys must be
+  mirrored in the cloud config schema (`apps/web/src/app/config.json/extras.ts`).

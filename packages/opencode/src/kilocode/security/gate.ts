@@ -20,6 +20,8 @@ import { ShellNormalizer } from "./shell"
 import { PackageMetadata } from "./package/metadata"
 import { PackageOperation } from "./package/operation"
 import { PackageRiskEvaluator } from "./package/evaluator"
+import { SecuritySessionState } from "./state/store"
+import { EgressGuard } from "./state/egress"
 import type {
   FileEffect,
   NormalizedAction,
@@ -315,15 +317,25 @@ export namespace SecurityGate {
       sandbox: { enabled: input.options.sandboxed },
     }
     const layers = input.options.layers ?? { packages: false, egress: false }
+    const callID = input.request.tool?.callID
     const started = performance.now()
     const exit = yield* Effect.exit(
       Effect.gen(function* () {
         const env = PathRisk.env({ workspace: input.options.workspace, home: ctx.home })
         const action = yield* normalize(input.request, ctx, env)
-        const base = SecurityEngine.evaluate(action, ctx)
-        if (!layers.packages) return base
-        const packages = yield* packageEvidence(action, base, ctx)
-        return SecurityEngine.extend(base, packages)
+        let decision = SecurityEngine.evaluate(action, ctx)
+        if (layers.packages) {
+          const packages = yield* packageEvidence(action, decision, ctx)
+          decision = SecurityEngine.extend(decision, packages)
+        }
+        if (layers.egress) {
+          // Record what this call would read/taint, keyed by the tool call so it is committed only
+          // when the call succeeds (see `execute`); fold the egress evidence in monotonically.
+          const egress = EgressGuard.assess({ action, sessionID: input.sessionID })
+          if (callID !== undefined) SecuritySessionState.recordPending(input.sessionID, callID, egress.pending)
+          decision = SecurityEngine.extend(decision, egress.evidence)
+        }
+        return decision
       }),
     )
     const durationMs = performance.now() - started
@@ -385,16 +397,40 @@ export namespace SecurityGate {
     return { request: { ...input.request, metadata: meta }, ruleset: [...input.ruleset, ...lifted] }
   }
 
+  /** Read a file's contents to fingerprint its secret values, on a committed sensitive read. */
+  function secretSource(file: string): string | undefined {
+    try {
+      const stat = statSync(file)
+      if (!stat.isFile() || stat.size > 8 * 1024 * 1024) return undefined
+      return readFileSync(file, "utf8")
+    } catch {
+      return undefined
+    }
+  }
+
   /**
    * Execution gate. Tools that are not known to ask for permission themselves get an envelope ask so
    * they are evaluated (unclassified tools stay governed by the existing rules); a security denial
    * raised anywhere inside the tool becomes a structured, non-fatal result.
+   *
+   * When the egress layer is on it also commits the session-state observations recorded at ask time:
+   * a tool that ran successfully really obtained what it read (so its values enter the session's
+   * secret set), while a blocked or failed tool discards them — a credential the agent was refused
+   * never becomes "secret context".
    */
   export function execute<A extends Tool.ExecuteResult, E, R>(
     input: { ctx: Tool.Context; tool: string; options: Options },
     effect: Effect.Effect<A, E, R>,
   ): Effect.Effect<A | Tool.ExecuteResult, E, R> {
     if (!input.options.enabled) return effect
+    const callID = input.ctx.callID
+    const sessionID = input.ctx.sessionID
+    const settle = (committed: boolean) =>
+      Effect.sync(() => {
+        if (!input.options.layers?.egress || callID === undefined) return
+        if (committed) SecuritySessionState.commit(sessionID, callID, secretSource)
+        else SecuritySessionState.discard(sessionID, callID)
+      })
     const envelope =
       READONLY.has(input.tool) || ASKING.has(input.tool)
         ? Effect.void
@@ -406,11 +442,18 @@ export namespace SecurityGate {
           })
     return envelope.pipe(
       Effect.andThen(effect),
+      Effect.tap((result) => {
+        // A tool may convert a denial into a structured blocked result rather than failing; a blocked
+        // result means the side effect did not happen, so discard rather than commit.
+        const security = (result.metadata as { security?: { status?: string } } | undefined)?.security
+        const blocked = security?.status === "blocked" || result.title === "Blocked by security policy"
+        return settle(!blocked)
+      }),
       Effect.catchCause((cause) => {
         const err = Cause.squash(cause)
-        if (!SecurityDeniedError.isInstance(err)) return Effect.failCause(cause)
+        if (!SecurityDeniedError.isInstance(err)) return settle(false).pipe(Effect.andThen(Effect.failCause(cause)))
         log.info("blocked", { tool: input.tool, reason: err.reasonCode })
-        return Effect.succeed(err.result(input.tool))
+        return settle(false).pipe(Effect.as(err.result(input.tool)))
       }),
     )
   }

@@ -32,9 +32,16 @@ import { McpApps } from "@/kilocode/mcp/apps"
 import { InstanceState } from "@/effect/instance-state"
 import { SecurityGate } from "@/kilocode/security/gate"
 import { SecurityKeys } from "@/kilocode/security/keys"
+import { SecuritySessionState } from "@/kilocode/security/state/store" // kilocode_change
+import { KiloSession } from "@/kilocode/session" // kilocode_change
 // kilocode_change end
 import { isRecord } from "@/util/record"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+
+// kilocode_change start: the security session-state layer keys state by the root session, so a
+// sub-agent's sensitive read is visible to its parent. Resolve the root through Kilo's session graph.
+SecuritySessionState.useRootResolver((id) => KiloSession.resolveRoot(id))
+// kilocode_change end
 
 const MCP_RESOURCE_TOOLS = {
   list: "list_mcp_resources",
