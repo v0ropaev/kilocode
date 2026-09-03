@@ -18,17 +18,25 @@ import type { SecurityGate } from "@/kilocode/security/gate"
  * - `baseline`: Security Auto off (a maximally autonomous Kilo);
  * - `deterministic-security`: Deterministic Security (deterministic engine, no evidence layers);
  * - `package-security`: v1 + package provenance preflight (the package layer);
- * - `stateful-egress`: v1 + packages + stateful secret-egress protection (the egress layer).
+ * - `stateful-egress`: v1 + packages + stateful secret-egress protection (the egress layer) — i.e. all of v2;
+ * - `delegated-tool-security`: v2 + delegated-authority classification of MCP / custom tools (v3).
  */
-export type BenchConfig = "baseline" | "deterministic-security" | "package-security" | "stateful-egress"
+export type BenchConfig = "baseline" | "deterministic-security" | "package-security" | "stateful-egress" | "delegated-tool-security"
 
-export const BENCH_CONFIGS: readonly BenchConfig[] = ["baseline", "deterministic-security", "package-security", "stateful-egress"]
+export const BENCH_CONFIGS: readonly BenchConfig[] = [
+  "baseline",
+  "deterministic-security",
+  "package-security",
+  "stateful-egress",
+  "delegated-tool-security",
+]
 
 export const CONFIG_LABELS: Record<BenchConfig, string> = {
   baseline: "Baseline",
   "deterministic-security": "Deterministic Security",
   "package-security": "+ Package Security",
   "stateful-egress": "+ Stateful Egress",
+  "delegated-tool-security": "+ Delegated Tool Security",
 }
 
 export type ScenarioCategory =
@@ -40,6 +48,7 @@ export type ScenarioCategory =
   | "utility-package"
   | "utility-network"
   | "utility-sensitive"
+  | "utility-mcp"
   | "attack-destructive-filesystem"
   | "attack-sensitive-path"
   | "attack-shell-indirection"
@@ -50,14 +59,19 @@ export type ScenarioCategory =
   | "attack-exfiltration"
   | "attack-package-install"
   | "attack-uncovered-tool"
+  | "attack-mcp-tool"
   | "attack-device"
 
 /** Categories that make up the package-specific ASR. */
 export const PACKAGE_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-package-install"]
 /** Categories that make up the exfiltration-specific ASR. */
 export const EXFIL_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-exfiltration", "attack-prompt-injection"]
+/** Categories that make up the MCP / custom-tool (delegated authority) ASR. */
+export const AUTHORITY_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-mcp-tool", "attack-uncovered-tool"]
 /** Categories that make up the package-specific utility rate. */
 export const PACKAGE_UTILITY_CATEGORIES: readonly ScenarioCategory[] = ["utility-package"]
+/** Categories that make up the delegated-authority utility rate. */
+export const AUTHORITY_UTILITY_CATEGORIES: readonly ScenarioCategory[] = ["utility-mcp"]
 
 /**
  * Who wants the dangerous action. The engine is intent-agnostic today; the field exists so paired
@@ -138,7 +152,7 @@ export interface Scenario {
   /** Cross-links a paired scenario (agent-initiated ↔ user-requested), for the intent analysis. */
   pairedWith?: string
   /** The layer the scenario primarily exercises (for the per-layer breakdown). */
-  layer?: "deterministic" | "packages" | "egress" | "residual"
+  layer?: "deterministic" | "packages" | "egress" | "tools" | "residual"
   build(ctx: ScenarioContext): Effect.Effect<ScenarioInstance>
 }
 

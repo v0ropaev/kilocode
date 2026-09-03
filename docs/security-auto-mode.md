@@ -13,18 +13,31 @@ Code map verified against commit `f062b0737eb6969644ab3fea7b391b8049401e4a` (202
 - Global config (`~/.config/kilo/kilo.json` or `opencode.json`): `{ "experimental": { "security_auto": true } }`
 - or the environment variable `KILO_SECURITY_AUTO=1` (`0` / `false` forces it off).
 
-Two additional evaluation layers (v2) are on whenever the mode is on and can be switched off
+Three additional evaluation layers are on whenever the mode is on and can be switched off
 individually, global config or environment only:
 
 | Layer | Config key | Env | Default |
 |---|---|---|---|
 | Package provenance preflight | `experimental.security_auto_packages` | `KILO_SECURITY_AUTO_PACKAGES` | on |
 | Stateful secret-egress protection | `experimental.security_auto_egress` | `KILO_SECURITY_AUTO_EGRESS` | on |
+| Delegated-authority classification | `experimental.security_auto_tools` | `KILO_SECURITY_AUTO_TOOLS` | on |
 
-Project configuration is ignored on purpose: a repository must not be able to switch the mode or its
-layers. The global config directory itself is protected by the engine's hard rules, so the agent
-cannot switch it either. The existing `--auto` / allow-everything semantics are untouched when the flag
-is off.
+The delegated-authority layer also reads the capabilities you vouch for, per tool id or glob:
+
+```jsonc
+{ "experimental": { "security_auto_tool_capabilities": {
+    "docs_*": ["readonly"],            // a read-only MCP server you trust
+    "deploy_upload": ["network"]       // an outbound tool you rely on
+} } }
+```
+
+Recognised names: `readonly`, `filesystem-read`, `filesystem-write`, `process`, `network`, `package`,
+`delegated-authority`, `security-control`. Unrecognised names are dropped rather than trusted.
+
+Project configuration is ignored on purpose: a repository must not be able to switch the mode, its
+layers, or the capabilities of the tools it also ships. The global config directory itself is protected
+by the engine's hard rules, so the agent cannot switch it either. The existing `--auto` /
+allow-everything semantics are untouched when the flag is off.
 
 ## Execution flow (as implemented in Kilo today)
 
@@ -45,6 +58,14 @@ model tool call
        │                        └─ Permission.ask   packages/opencode/src/permission/index.ts (existing deny / veto / prompt logic)
        ├─ plugin.trigger("tool.execute.after")
        └─ SessionProcessor → tool part → next model context
+
+MCP tool call
+  └─ SessionTools.resolve (MCP loop)          packages/opencode/src/session/tools.ts
+       └─ SandboxPolicy.executeMcp
+            └─ SecurityGate.delegate           settles session state, denial → structured result
+                 └─ ctx.ask(<server>_<tool>)   carries the MCP identity + capabilities
+                      └─ KiloSessionPrompt.askPermission → SecurityGate → Permission.ask
+                 └─ client.callTool(...)       the remote call, only if the ask succeeded
 ```
 
 The shell tool additionally parses the command with Tree-sitter (`ShellPermission.check`) and asks
@@ -134,9 +155,9 @@ non-destructive mutations, project scripts (`npm test`, `make`, `python script.p
 Package installs, fetch-and-execute (`npx`), outbound network tools, interpreter inline code, writes
 outside the workspace, unrecognised git subcommands and unclassified tools are soft ASK.
 
-## Security Auto layers
+## Evaluation layers (v2 / v3)
 
-Two evaluation layers run after the v1 rules and hand structured evidence to the same monotonic
+Three evaluation layers run after the v1 rules and hand structured evidence to the same monotonic
 reducer, so they can only *tighten* a decision — a deterministic v1 DENY / hard ASK is never weakened,
 and their own failures fail safe (a hard ASK, never ALLOW). Each is independently switchable (see
 [Enabling](#enabling)).
@@ -191,6 +212,44 @@ sequence is exfiltration (`read secret → copy → outbound`). `packages/openco
   It does not track dataflow inside arbitrary programs, encoded/transformed values, or secrets the user
   typed directly.
 
+### Delegated-authority classification (`security_auto_tools`)
+
+Closes the class where a tool executes simply because it is not a built-in that calls `ctx.ask`: MCP
+tools, plugin tools and workspace (`.kilocode/tool/*.ts`) tools.
+`packages/opencode/src/kilocode/security/tool/`.
+
+- **Capability model** (`capability.ts`): every tool resolves to a descriptor — capabilities
+  (`readonly`, `filesystem-read/-write`, `process`, `network`, `package`, `delegated-authority`,
+  `security-control`), how they were established (`builtin` table / user `declared` / `unknown`), and
+  whether the tool adjudicates its own side effect. The table is the single source of truth: the
+  execution gate derives its "needs no envelope ask" sets from it, so a tool cannot be classified in
+  one place and forgotten in the other, and a tool added without a classification is `unknown`.
+- **Provenance** (`origin.ts`) is structural, never self-declared: `builtin` is the marker only the
+  registry sets (a module-local symbol), `trusted-config` / `workspace` / `plugin` are recorded by the
+  loader from where the file came, `mcp-local` / `mcp-remote` from the MCP entry's own marker, and
+  anything unmarked is `unknown`. A workspace tool that registers itself under a built-in's id
+  therefore inherits none of that id's classification — and still gets the envelope ask.
+- **MCP identity** reaching the decision: server name, tool name as published, resource URI where
+  applicable, remote-vs-local, and the arguments (in process only). A server's own description and
+  annotations are treated as untrusted data: `readOnlyHint` grants nothing, `destructiveHint` tightens.
+- **Decision** (`authority.ts`): unknown authority is a hard ASK, never a silent ALLOW — for a
+  workspace tool, an MCP tool, and equally for a built-in missing from the table. A declaration makes a
+  tool known and keeps the ordinary low-friction path, except that `process` / `security-control`
+  cannot be delegated unattended (the policy cannot see the command such a tool will run). The
+  arguments of a non-built-in tool are classified with the same path policy as a shell command, so a
+  tool writing to `~/.ssh`, a shell profile or Kilo's own config is refused whatever it was declared to
+  be. Composition with the session state: an outbound call while the session holds credential
+  material is a hard ASK; a call that carries a value read from a credential this session, or uploads a
+  file that received one, is a DENY.
+- **Tool-result provenance** (foundation only): results from outside Kilo carry a
+  `securityProvenance` marker (`mcp-untrusted`, `remote-untrusted`, `workspace-untrusted`,
+  `plugin-untrusted`, `config-untrusted`) in their metadata. Nothing reads it as policy today, no
+  content is inspected or rewritten; it exists for audit and for a future classifier.
+- Honest guarantee: *a tool with unknown or non-delegatable authority cannot run unattended, and what
+  it says about itself cannot lower that bar.* It does not make a tool the user vouched for safe, does
+  not analyse what a declared `process` tool executes, and does not govern code that runs at module
+  load time (see limitations).
+
 ## Structured safe continuation
 
 A DENY inside a tool becomes a completed tool result titled "Blocked by security policy" whose
@@ -215,7 +274,13 @@ catches repeated identical attempts.
   (`test/kilocode/security/package.test.ts`);
 - a committed sensitive read updates session state and influences later outbound decisions; a
   refused read does not; session state is isolated between sessions and holds no raw secret values; a
-  protected egress block happens before the outbound side effect (`test/kilocode/security/egress.test.ts`).
+  protected egress block happens before the outbound side effect (`test/kilocode/security/egress.test.ts`);
+- an unknown tool is never a silent ALLOW; a DENY means neither the custom-tool body nor the
+  remote MCP call runs; the envelope-ask sets are derived from the capability table and still match the
+  base contract exactly; a tool cannot raise its own trust through its id, description, annotations or
+  arguments; a capability-resolution failure falls back to the conservative descriptor rather than
+  dropping the layer; a custom tool cannot erase its own session-state record by declaring itself
+  blocked (`test/kilocode/security/tool.test.ts`).
 
 ## Adversarial review
 
@@ -243,16 +308,36 @@ or the state snapshot. Confirmed residuals kept honest: opaque subprocess flow (
 secret`, unknown outbound tools) and encoded values are not statically contained, and pip/cargo/go are
 outside the npm-family package scope.
 
+The delegated-authority layer was reviewed the same way: an MCP tool whose *name* advertises read-only, a server
+annotation claiming `readOnlyHint`, a tool declaring trust through its own arguments, a workspace tool
+shadowing a built-in id, `file://` URIs naming key material, arrays and circular argument trees, hostile
+capability-declaration globs, non-boolean hints, sub-agent vs unrelated-session state, and a poisoned
+capability resolver. Two real defects were found and fixed: a tool the user declared `process` was only
+a soft ASK (now `hard.tool.delegated-execution`, because the policy cannot see the command it will
+run), and a `file://` URI was excluded from path classification (now decoded and classified like the
+path it names). Confirmed residuals: a declared tool is trusted for *what* it does within its declared
+capability, and a secret split across arguments or nested deeper than the bounded argument walk is not
+value-matched — the same-session context rule still raises a hard ASK in those cases.
+
 ## Known limitations (not guaranteed by this slice)
 
 - Sandbox off is materially weaker: allowed workspace scripts (`npm run x`, `make`, `python script.py`)
   run with full host authority; the engine only decides whether an action may be attempted.
 - Interpreter inline code (`python -c`, `node -e`) is a soft ASK, not analysed.
 - Network policy without secret context is unchanged: `webfetch`, `websearch`, an ordinary `curl` are
-  soft ASK / existing rules. MCP tools and custom tools remain unclassified (existing rules decide) —
-  an intentional residual class for the next milestone; `notify_user`, `background_process`
-  restart/stop and `generate_image` upload perform effects without a classifiable ask (pre-existing
-  Kilo gaps).
+  soft ASK / existing rules.
+- (v3 residuals) **Load-time execution is not governed at all**: `.kilocode/tool/*.ts` and project
+  plugins are `import()`ed while the registry/plugin state is built — before any tool call, ask or
+  sandbox — so opening a session in a hostile repository is already arbitrary code execution in the
+  host process. The v3 layer governs tool *invocation*, not module loading; this is the strongest
+  residual risk in the class and needs a separate trust decision for project-provided code.
+  Plugin hooks (`tool.execute.before/after`, `config`, `agent.transform`) likewise run in-process
+  outside the gate, and a plugin holding the local SDK client can answer a pending prompt as if it were
+  interactive. `McpApps.callTool` (experimental MCP Apps) calls any connected server straight from an
+  HTTP handler with no session, ask or gate. A declared `process` tool is hard-asked but its command is
+  never inspected. An MCP server can also swap its tool definitions between steps
+  (`notifications/tools/list_changed`) and its instructions/descriptions flow into the prompt unfiltered —
+  prompt injection through MCP text is explicitly out of scope here.
 - (egress) The egress layer sees only controlled built-in flows: an **opaque subprocess** that
   reads a secret and sends it itself (`python upload.py secret`, an unknown outbound tool) is not
   contained by static state — the OS sandbox is the control there; **encoded/transformed** values are
@@ -275,6 +360,11 @@ outside the npm-family package scope.
   own traversal protections are relied upon for the rest.
 - Unrecognised commands are judged by their escaping operands only; an unknown tool writing to a
   workspace-relative path it names differently is not detected.
-- Prompt-file attachments and the subtask command path call `askPermission` without the gate (user-initiated).
-- The `experimental.security_auto`, `security_auto_packages` and `security_auto_egress` keys must be
-  mirrored in the cloud config schema (`apps/web/src/app/config.json/extras.ts`).
+- Prompt-file attachments call `askPermission` without the gate (user-initiated). The subtask command
+  path now passes the gate (since fixed).
+- Session state keys on the root session resolved from an in-process map. A child session prompted in a
+  process that never created it (server restart, direct prompt to a subagent id) resolves to itself and
+  starts with empty secret context; a durable ancestry query would be needed to close that.
+- The `experimental.security_auto`, `security_auto_packages`, `security_auto_egress`,
+  `security_auto_tools` and `security_auto_tool_capabilities` keys must be mirrored in the cloud config
+  schema (`apps/web/src/app/config.json/extras.ts`).

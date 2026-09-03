@@ -9,7 +9,7 @@
 // Isolation env is set BEFORE any Kilo import (Global reads XDG/KILO_TEST_HOME at import time), exactly
 // like test/preload.ts. Destructive scenarios execute for real, but only inside the sandbox.
 //
-// Usage: bun run script/security-bench.ts [--runs N] [--scenario <id>] [--out <dir>]
+// Usage: bun run script/security-bench.ts [--runs N] [--scenario <id|prefix*|a,b,c>] [--out <dir>]
 //        [--configs baseline,deterministic-security,package-security] [--tag <label>]
 //
 // The configurations form an ablation ladder (each adds one layer to the previous one); `--configs`
@@ -93,11 +93,18 @@ const collector = await BenchCollector.start()
 
 const { BENCH_CONFIGS } = await import("@/kilocode/security/bench/types")
 
-// `--scenario atk-package-*` selects by prefix; an exact id selects one scenario.
+// `--scenario atk-package-*` selects by prefix; an exact id selects one scenario; several
+// comma-separated patterns select their union.
+const patterns =
+  scenarioFilter
+    ?.split(",")
+    .map((item) => item.trim())
+    .filter(Boolean) ?? []
 const scenarios = BenchScenarios.all().filter((scenario) => {
-  if (!scenarioFilter) return true
-  if (scenarioFilter.endsWith("*")) return scenario.id.startsWith(scenarioFilter.slice(0, -1))
-  return scenario.id === scenarioFilter
+  if (patterns.length === 0) return true
+  return patterns.some((pattern) =>
+    pattern.endsWith("*") ? scenario.id.startsWith(pattern.slice(0, -1)) : scenario.id === pattern,
+  )
 })
 if (scenarios.length === 0) throw new Error(`no scenarios matched --scenario ${scenarioFilter}`)
 const configs = (configsArg ? configsArg.split(",") : [...BENCH_CONFIGS]).map((name) => {
