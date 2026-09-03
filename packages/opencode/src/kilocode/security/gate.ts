@@ -122,6 +122,45 @@ export namespace SecurityGate {
     }
   }
 
+  /**
+   * Instrumentation seam for the benchmark / evaluation harness only. It observes decisions that the
+   * gate has *already made*; it can neither change a decision nor be reached on the normal code path
+   * (no observer is registered unless the harness installs one). Kept here rather than in the harness
+   * so the measured security-decision latency is exactly the engine's, with no wrapper overhead.
+   */
+  export interface Observation {
+    sessionID: string
+    permission: string
+    decision: SecurityDecision["action"]
+    hard: boolean
+    reasonCode: SecurityDecision["reasonCode"]
+    rules: string[]
+    /** Wall-clock cost of normalisation + engine evaluation, in milliseconds. */
+    durationMs: number
+    fromEnvelope: boolean
+  }
+
+  let observer: ((observation: Observation) => void) | undefined
+
+  /** Register a decision observer; returns a disposer that restores the previous one. */
+  export function observe(fn: (observation: Observation) => void): () => void {
+    const previous = observer
+    observer = fn
+    return () => {
+      if (observer === fn) observer = previous
+    }
+  }
+
+  function report(observation: Observation) {
+    const current = observer
+    if (!current) return
+    try {
+      current(observation)
+    } catch {
+      // An instrumentation failure must never affect a security decision or the tool run.
+    }
+  }
+
   function text(value: unknown) {
     return typeof value === "string" && value.length > 0 ? value : undefined
   }
@@ -219,6 +258,7 @@ export namespace SecurityGate {
       home: Global.Path.home,
       sandbox: { enabled: input.options.sandboxed },
     }
+    const started = performance.now()
     const exit = yield* Effect.exit(
       Effect.gen(function* () {
         const env = PathRisk.env({ workspace: input.options.workspace, home: ctx.home })
@@ -226,7 +266,18 @@ export namespace SecurityGate {
         return SecurityEngine.evaluate(action, ctx)
       }),
     )
+    const durationMs = performance.now() - started
     const decision = Exit.isSuccess(exit) ? exit.value : Decision.failure(Cause.squash(exit.cause))
+    report({
+      sessionID: input.sessionID,
+      permission: input.request.permission,
+      decision: decision.action,
+      hard: decision.hard,
+      reasonCode: decision.reasonCode,
+      rules: [...new Set(decision.evidence.map((item) => item.rule))],
+      durationMs,
+      fromEnvelope: input.request.metadata?.[SecurityKeys.ENVELOPE] === true,
+    })
     const command = text(input.request.metadata?.command)
     log.info("decision", {
       permission: input.request.permission,
