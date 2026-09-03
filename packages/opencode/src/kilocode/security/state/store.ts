@@ -39,7 +39,15 @@ export namespace SecuritySessionState {
 
   export interface Event {
     at: number
-    kind: "sensitive-read" | "taint" | "untaint" | "egress-denied" | "egress-asked" | "discard" | "reset"
+    kind:
+      | "sensitive-read"
+      | "content-secret"
+      | "taint"
+      | "untaint"
+      | "egress-denied"
+      | "egress-asked"
+      | "discard"
+      | "reset"
     labels?: Label[]
     rule?: string
     via?: TaintVia
@@ -49,6 +57,24 @@ export namespace SecuritySessionState {
     reads: { canonical: string; labels: Label[]; relation: PathRelation }[]
     taints: { canonical: string; labels: Label[]; via: TaintVia }[]
     untaints: string[]
+    /**
+     * Resources this call would read whose *path* says nothing about sensitivity.
+     * They become sensitive only if the content the call actually returned is classified as credential
+     * material — so a name alone never marks anything, and a refused call marks nothing at all.
+     */
+    candidates?: { canonical: string; relation: PathRelation }[]
+  }
+
+  /**
+   * What the content classifier found in the output a completed call actually produced. `values` are
+   * fingerprinted immediately and never stored; `kinds` are detector ids for the audit event.
+   */
+  export interface Observed {
+    labels: Label[]
+    values: string[]
+    kinds: string[]
+    /** Resource id to record when the call named no candidate path (e.g. an MCP result). */
+    source?: string
   }
 
   interface State {
@@ -184,6 +210,11 @@ export namespace SecuritySessionState {
     return [...new Set(state.reads.flatMap((read) => read.labels))]
   }
 
+  /** Candidate resources recorded for a call, so the caller can name the source of observed content. */
+  export function pendingCandidates(sessionID: string, callID: string): { canonical: string }[] {
+    return get(sessionID)?.pending.get(callID)?.candidates ?? []
+  }
+
   export function taintOf(sessionID: string, canonical: string): Taint | undefined {
     return get(sessionID)?.tainted.get(canonical)
   }
@@ -200,13 +231,20 @@ export namespace SecuritySessionState {
 
   /** Remember what a tool call *would* obtain or taint; applied by {@link commit}, dropped by {@link discard}. */
   export function recordPending(sessionID: string, callID: string, pending: Pending) {
-    if (pending.reads.length === 0 && pending.taints.length === 0 && pending.untaints.length === 0) return
+    if (
+      pending.reads.length === 0 &&
+      pending.taints.length === 0 &&
+      pending.untaints.length === 0 &&
+      (pending.candidates?.length ?? 0) === 0
+    )
+      return
     const state = open(sessionID)
     const existing = state.pending.get(callID)
     if (existing) {
       existing.reads.push(...pending.reads)
       existing.taints.push(...pending.taints)
       existing.untaints.push(...pending.untaints)
+      if (pending.candidates?.length) existing.candidates = [...(existing.candidates ?? []), ...pending.candidates]
       return
     }
     if (state.pending.size >= MAX_PENDING) {
@@ -217,7 +255,12 @@ export namespace SecuritySessionState {
   }
 
   /** Apply a pending observation directly (used when no tool call links the ask to an execution). */
-  export function apply(sessionID: string, pending: Pending, readFile?: (canonical: string) => string | undefined) {
+  export function apply(
+    sessionID: string,
+    pending: Pending,
+    readFile?: (canonical: string) => string | undefined,
+    observed?: Observed,
+  ) {
     const state = open(sessionID)
     const now = Date.now()
     let reads = 0
@@ -255,17 +298,47 @@ export namespace SecuritySessionState {
     for (const canonical of pending.untaints) {
       if (state.tainted.delete(canonical)) event(state, { at: now, kind: "untaint" })
     }
+
+    // Content the call really returned was classified as credential material. The
+    // resources it came from become sensitive, and the values are fingerprinted — never stored.
+    if (observed && observed.labels.length > 0) {
+      const sources = (pending.candidates ?? []).map((item) => ({ canonical: item.canonical, relation: item.relation }))
+      const targets: { canonical: string; relation: PathRelation }[] =
+        sources.length > 0 ? sources : [{ canonical: observed.source ?? "content", relation: "unknown" }]
+      for (const target of targets) {
+        const key = fingerprint(target.canonical)
+        if (state.reads.some((item) => item.fingerprint === key)) continue
+        state.reads.push({ fingerprint: key, labels: observed.labels, relation: target.relation, at: now })
+        if (state.reads.length > MAX_READS) state.reads.splice(0, state.reads.length - MAX_READS)
+        reads += 1
+      }
+      for (const value of observed.values) {
+        if (state.values.size >= MAX_VALUES) break
+        state.values.add(SecretValues.digest(state.salt, value))
+      }
+      event(state, { at: now, kind: "content-secret", labels: observed.labels, rule: observed.kinds.join(",") })
+    }
+
     touch(state, now)
     return { reads, taints }
   }
 
-  /** The tool call completed: what it asked to read/taint really happened. */
-  export function commit(sessionID: string, callID: string, readFile?: (canonical: string) => string | undefined) {
+  /**
+   * The tool call completed: what it asked to read/taint really happened. `observed` carries what the
+   * content classifier found in the output the call actually produced, so a session
+   * becomes sensitive from observed content, never from a name or a refused request.
+   */
+  export function commit(
+    sessionID: string,
+    callID: string,
+    readFile?: (canonical: string) => string | undefined,
+    observed?: Observed,
+  ) {
     const state = get(sessionID)
     const pending = state?.pending.get(callID)
-    if (!state || !pending) return { reads: 0, taints: 0 }
-    state.pending.delete(callID)
-    return apply(sessionID, pending, readFile)
+    if (!pending && !observed) return { reads: 0, taints: 0 }
+    if (state && pending) state.pending.delete(callID)
+    return apply(sessionID, pending ?? { reads: [], taints: [], untaints: [] }, readFile, observed)
   }
 
   /** The tool call was refused or failed: nothing it asked for happened. */

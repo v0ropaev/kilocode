@@ -616,7 +616,18 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             // kilocode_change - the security gate wraps the delegated call the same way it wraps a
             // built-in one: settle the session state, and turn a denial into a structured result
             SecurityGate.delegate(
-              { ctx, tool: key, options: security },
+              {
+                ctx,
+                tool: key,
+                options: security,
+                // kilocode_change - the text the agent will actually receive, for content classification
+                output: (value: McpResult) =>
+                  value.content
+                    ?.flatMap((item: { type: string; text?: string }) =>
+                      item.type === "text" ? [item.text ?? ""] : [],
+                    )
+                    .join("\n"),
+              },
               denied,
               Effect.gen(function* () {
                 yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })

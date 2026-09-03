@@ -22,6 +22,7 @@ import { PackageOperation } from "./package/operation"
 import { PackageRiskEvaluator } from "./package/evaluator"
 import { SecuritySessionState } from "./state/store"
 import { EgressGuard } from "./state/egress"
+import { SecretContent } from "./state/content"
 import { ToolAuthority } from "./tool/authority"
 import { ToolCapability } from "./tool/capability"
 import type {
@@ -101,7 +102,9 @@ export namespace SecurityGate {
     workspace: { directory: string; worktree: string }
   }) {
     const enabled = yield* SecurityFlag.enabled(input.config)
-    const layers = enabled ? yield* SecurityFlag.layers(input.config) : { packages: false, egress: false, tools: false }
+    const layers: SecurityFlag.Layers = enabled
+      ? yield* SecurityFlag.layers(input.config)
+      : { packages: false, egress: false, tools: false, content: false }
     const declarations = enabled && layers.tools ? yield* SecurityFlag.declarations(input.config) : []
     const result: Options = { enabled, sandboxed: input.sandboxed, workspace: input.workspace, layers, declarations }
     return result
@@ -351,7 +354,7 @@ export namespace SecurityGate {
       home: Global.Path.home,
       sandbox: { enabled: input.options.sandboxed },
     }
-    const layers = input.options.layers ?? { packages: false, egress: false, tools: false }
+    const layers = input.options.layers ?? { packages: false, egress: false, tools: false, content: false }
     const callID = input.request.tool?.callID
     const started = performance.now()
     const exit = yield* Effect.exit(
@@ -366,7 +369,11 @@ export namespace SecurityGate {
         if (layers.egress) {
           // Record what this call would read/taint, keyed by the tool call so it is committed only
           // when the call succeeds (see `execute`); fold the egress evidence in monotonically.
-          const egress = EgressGuard.assess({ action, sessionID: input.sessionID })
+          const egress = EgressGuard.assess({
+            action,
+            sessionID: input.sessionID,
+            ...(layers.content ? { readFile: contentSource } : {}),
+          })
           if (callID !== undefined) SecuritySessionState.recordPending(input.sessionID, callID, egress.pending)
           decision = SecurityEngine.extend(decision, egress.evidence)
         }
@@ -378,6 +385,7 @@ export namespace SecurityGate {
             ctx,
             env,
             sessionID: input.sessionID,
+            ...(layers.content ? { readFile: contentSource } : {}),
           })
           if (callID !== undefined) SecuritySessionState.recordPending(input.sessionID, callID, authority.pending)
           decision = SecurityEngine.extend(decision, authority.evidence)
@@ -444,6 +452,21 @@ export namespace SecurityGate {
     return { request: { ...input.request, metadata: meta }, ruleset: [...input.ruleset, ...lifted] }
   }
 
+  /**
+   * Bounded, synchronous read used at *decision* time to classify content an action would send.
+   * Smaller cap than {@link secretSource}: this runs before an outbound action, not after a
+   * completed read.
+   */
+  function contentSource(file: string): string | undefined {
+    try {
+      const stat = statSync(file)
+      if (!stat.isFile() || stat.size > 1024 * 1024) return undefined
+      return readFileSync(file, "utf8")
+    } catch {
+      return undefined
+    }
+  }
+
   /** Read a file's contents to fingerprint its secret values, on a committed sensitive read. */
   function secretSource(file: string): string | undefined {
     try {
@@ -452,6 +475,35 @@ export namespace SecurityGate {
       return readFileSync(file, "utf8")
     } catch {
       return undefined
+    }
+  }
+
+  /**
+   * Classify the content a completed call actually returned. A session becomes
+   * sensitive from *observed* content, never from a filename and never from a refused request, so this
+   * runs only on the success path with the output the agent really received.
+   *
+   * Returns nothing when the content earns no label — including when classification fails, which
+   * leaves whatever sensitivity the session already had untouched rather than clearing it.
+   */
+  function observeContent(input: {
+    text: string | undefined
+    tool: string
+    sessionID: string
+    callID: string
+  }): SecuritySessionState.Observed | undefined {
+    if (!input.text) return undefined
+    const candidates = SecuritySessionState.pendingCandidates(input.sessionID, input.callID)
+    // Only name the source file when the call read exactly one: with several, a per-file rule (skipping
+    // structurally noisy files) could not be attributed correctly.
+    const file = candidates.length === 1 ? candidates[0]!.canonical : undefined
+    const result = SecretContent.classify(input.text, file ? { file } : {})
+    if (result.labels.length === 0) return undefined
+    return {
+      labels: result.labels,
+      values: result.values,
+      kinds: [...new Set(result.findings.map((item) => item.kind))],
+      source: `tool:${input.tool}`,
     }
   }
 
@@ -475,11 +527,14 @@ export namespace SecurityGate {
     // A tool that Kilo did not ship cannot be trusted to ask for permission on its own, and cannot be
     // trusted to report honestly that it was blocked. Both facts follow from provenance alone.
     const trusted = input.invocation === undefined || input.invocation.descriptor.provenance === "builtin"
-    const settle = (committed: boolean) =>
+    const settle = (committed: boolean, output?: string) =>
       Effect.sync(() => {
         if (!input.options.layers?.egress || callID === undefined) return
-        if (committed) SecuritySessionState.commit(sessionID, callID, secretSource)
-        else SecuritySessionState.discard(sessionID, callID)
+        if (!committed) return SecuritySessionState.discard(sessionID, callID)
+        const observed = input.options.layers.content
+          ? observeContent({ text: output, tool: input.tool, sessionID, callID })
+          : undefined
+        SecuritySessionState.commit(sessionID, callID, secretSource, observed)
       })
     // Tool-id shadowing: a workspace or plugin tool may call itself `read` or `list`. The envelope is
     // skipped only for a genuine built-in, so borrowing a built-in's name buys nothing.
@@ -501,7 +556,8 @@ export namespace SecurityGate {
         // custom tool read a credential and then declare itself blocked to erase the session's record.
         const security = (result.metadata as { security?: { status?: string } } | undefined)?.security
         const claimed = security?.status === "blocked" || result.title === "Blocked by security policy"
-        return settle(!(claimed && trusted))
+        const blocked = claimed && trusted
+        return settle(!blocked, blocked ? undefined : result.output)
       }),
       Effect.catchCause((cause) => {
         const err = Cause.squash(cause)
@@ -519,21 +575,30 @@ export namespace SecurityGate {
    * that ends the turn.
    */
   export function delegate<A, E, R>(
-    input: { ctx: Tool.Context; tool: string; options: Options },
+    input: {
+      ctx: Tool.Context
+      tool: string
+      options: Options
+      /** Text of the delegated result, for content classification. */
+      output?: (value: A) => string | undefined
+    },
     blocked: (error: SecurityDeniedError) => A,
     effect: Effect.Effect<A, E, R>,
   ): Effect.Effect<A, E, R> {
     if (!input.options.enabled) return effect
     const callID = input.ctx.callID
     const sessionID = input.ctx.sessionID
-    const settle = (committed: boolean) =>
+    const settle = (committed: boolean, output?: string) =>
       Effect.sync(() => {
         if (!input.options.layers?.egress || callID === undefined) return
-        if (committed) SecuritySessionState.commit(sessionID, callID, secretSource)
-        else SecuritySessionState.discard(sessionID, callID)
+        if (!committed) return SecuritySessionState.discard(sessionID, callID)
+        const observed = input.options.layers.content
+          ? observeContent({ text: output, tool: input.tool, sessionID, callID })
+          : undefined
+        SecuritySessionState.commit(sessionID, callID, secretSource, observed)
       })
     return effect.pipe(
-      Effect.tap(() => settle(true)),
+      Effect.tap((value) => settle(true, input.output?.(value))),
       Effect.catchCause((cause) => {
         const err = Cause.squash(cause)
         if (!SecurityDeniedError.isInstance(err)) return settle(false).pipe(Effect.andThen(Effect.failCause(cause)))

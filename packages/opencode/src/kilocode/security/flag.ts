@@ -23,6 +23,8 @@ export namespace SecurityFlag {
     egress: boolean
     /** Delegated-authority classification of MCP / custom / unclassified tools. */
     tools: boolean
+    /** Secret classification of content the agent actually obtained. */
+    content: boolean
   }
 
   function truthy(value: string | undefined) {
@@ -53,6 +55,7 @@ export namespace SecurityFlag {
       packages: layer(process.env["KILO_SECURITY_AUTO_PACKAGES"], global?.experimental?.security_auto_packages),
       egress: layer(process.env["KILO_SECURITY_AUTO_EGRESS"], global?.experimental?.security_auto_egress),
       tools: layer(process.env["KILO_SECURITY_AUTO_TOOLS"], global?.experimental?.security_auto_tools),
+      content: layer(process.env["KILO_SECURITY_AUTO_CONTENT"], global?.experimental?.security_auto_content),
     }
     return result
   })

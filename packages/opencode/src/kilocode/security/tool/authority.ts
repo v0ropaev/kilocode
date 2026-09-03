@@ -2,6 +2,7 @@ import path from "path"
 import { evidence as makeEvidence } from "../decision"
 import { PathRisk } from "../path"
 import { SecurityRules } from "../rules"
+import { SecretContent } from "../state/content"
 import { SecuritySessionState } from "../state/store"
 import { SecretValues } from "../state/values"
 import { ToolCapability } from "./capability"
@@ -36,6 +37,8 @@ export namespace ToolAuthority {
     ctx: SecurityContext
     env: PathRisk.Env
     sessionID: string
+    /** Bounded reader used to classify content an outbound tool would send. */
+    readFile?: (canonical: string) => string | undefined
   }
 
   export interface Assessment {
@@ -251,6 +254,35 @@ export namespace ToolAuthority {
         const target = PathRisk.classify(absolute, input.ctx.cwd, input.env)
         return SecuritySessionState.taintOf(input.sessionID, target.canonical) !== undefined
       })
+    // An outbound tool asked to send a file whose contents are credential material. The path says
+    // nothing and the agent never read it, so only the content itself can establish this.
+    const secretContent =
+      outbound && input.readFile !== undefined
+        ? values.some((value) => {
+            const absolute = resolve(value, input.ctx.cwd)
+            if (absolute === undefined) return false
+            const target = PathRisk.classify(absolute, input.ctx.cwd, input.env)
+            if (target.relation === "unknown") return false
+            const text = input.readFile!(target.canonical)
+            return text !== undefined && SecretContent.sensitive(text, { file: target.canonical })
+          })
+        : false
+    if (secretContent) {
+      evidence.push(
+        hard(
+          "hard.tool.secret-content",
+          "deny",
+          "SECRET_EXFILTRATION",
+          "The call would send a file whose contents are credential material.",
+          identity,
+        ),
+      )
+      SecuritySessionState.note(input.sessionID, {
+        at: Date.now(),
+        kind: "egress-denied",
+        rule: "hard.tool.secret-content",
+      })
+    }
     if (tainted) {
       evidence.push(
         hard(

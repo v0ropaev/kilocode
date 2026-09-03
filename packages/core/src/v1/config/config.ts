@@ -332,6 +332,10 @@ export const Info = Schema.Struct({
         description:
           "Security Auto Mode layer: classify the authority of MCP, plugin and workspace tools before they run, so a tool nothing vouches for cannot execute unattended. On by default when security_auto is on; set false to disable. Global config only.",
       }),
+      security_auto_content: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Security Auto Mode layer: classify the content the agent actually obtains, so a credential living in an ordinary workspace file is recognised even though its path is not sensitive. On by default when security_auto is on; set false to disable. Global config only.",
+      }),
       security_auto_tool_capabilities: Schema.optional(
         Schema.Record(Schema.String, Schema.mutable(Schema.Array(Schema.String))),
       ).annotate({
