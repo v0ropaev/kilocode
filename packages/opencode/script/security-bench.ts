@@ -1,0 +1,133 @@
+// kilocode_change - new file
+//
+// Security Auto Mode benchmark runner.
+//
+// Runs the same scripted coding-agent trajectories in the baseline (Security Auto OFF) and protected
+// (Security Auto ON) configurations, in a disposable sandbox under the OS temp dir, and reports the
+// measured Attack Success Rate, utility, friction, and security-decision latency.
+//
+// Isolation env is set BEFORE any Kilo import (Global reads XDG/KILO_TEST_HOME at import time), exactly
+// like test/preload.ts. Destructive scenarios execute for real, but only inside the sandbox.
+//
+// Usage: bun run script/security-bench.ts [--runs N] [--scenario <id>] [--out <dir>]
+
+import os from "node:os"
+import path from "node:path"
+import fs from "node:fs/promises"
+import { randomUUID } from "node:crypto"
+
+function arg(name: string, fallback?: string): string | undefined {
+  const index = process.argv.indexOf(`--${name}`)
+  return index >= 0 && index + 1 < process.argv.length ? process.argv[index + 1] : fallback
+}
+
+const runsPerCase = Math.max(1, Number(arg("runs", "3")) || 3)
+const scenarioFilter = arg("scenario")
+
+// ---------------------------------------------------------------------------
+// Isolation env — must run before importing anything from src/.
+// ---------------------------------------------------------------------------
+const base = path.join(os.tmpdir(), `kilo-sec-bench-${process.pid}-${randomUUID()}`)
+const home = path.join(base, "home")
+// Deliberately NOT named "sandbox"/"config"/"permission": the engine's KILO_ROUTES rule matches those
+// substrings in any network-command argument, so a workspace path containing one would falsely trip
+// hard.network.kilo-route. Keeping the root neutral avoids contaminating every network scenario.
+const sandboxRoot = path.join(base, "arena")
+await fs.mkdir(home, { recursive: true })
+await fs.mkdir(sandboxRoot, { recursive: true })
+await fs.mkdir(path.join(base, "cache", "kilo"), { recursive: true })
+await fs.writeFile(path.join(base, "cache", "kilo", "version"), "21")
+
+process.env.XDG_DATA_HOME = path.join(base, "share")
+process.env.XDG_CACHE_HOME = path.join(base, "cache")
+process.env.XDG_CONFIG_HOME = path.join(base, "config")
+process.env.XDG_STATE_HOME = path.join(base, "state")
+process.env.KILO_TEST_HOME = home
+process.env.HOME = home
+process.env.KILO_DB = ":memory:"
+process.env.KILO_DISABLE_MODELS_FETCH = "1"
+process.env.KILO_DISABLE_DEFAULT_PLUGINS = "true"
+process.env.KILO_TELEMETRY_LEVEL = "off"
+process.env.KILO_MODELS_PATH = path.join(import.meta.dir, "..", "test", "tool", "fixtures", "models-api.json")
+process.env.KILO_EXPERIMENTAL_EVENT_SYSTEM = "true"
+process.env.KILO_EXPERIMENTAL_WORKSPACES = "true"
+process.env.KILO_EXPERIMENTAL_DISABLE_FILEWATCHER = "true"
+// Never let the model shell inherit real provider credentials.
+for (const key of Object.keys(process.env)) {
+  if (/_API_KEY$|^AWS_|^ANTHROPIC|^OPENAI|^OPENROUTER/.test(key)) delete process.env[key]
+}
+// Critical for a fair comparison: SecurityFlag.enabled reads KILO_SECURITY_AUTO *before* the config
+// flag, so a stray env var would force baseline and protected identical. Scrub it (the harness also
+// clears it per run) so the config layer is the only thing that toggles the engine.
+delete process.env.KILO_SECURITY_AUTO
+
+// ---------------------------------------------------------------------------
+// Now it is safe to import Kilo + the harness.
+// ---------------------------------------------------------------------------
+const { Effect } = await import("effect")
+const { Global } = await import("@opencode-ai/core/global")
+const { BenchHarness } = await import("@/kilocode/security/bench/harness")
+const { BenchScenarios } = await import("@/kilocode/security/bench/scenarios")
+const { BenchMetrics } = await import("@/kilocode/security/bench/metrics")
+const { BenchReport } = await import("@/kilocode/security/bench/report")
+const { BenchCollector } = await import("@/kilocode/security/bench/collector")
+const { BenchIsolation } = await import("@/kilocode/security/bench/isolation")
+
+// Fail closed: if the isolation env did not take, do not run destructive scenarios.
+if (Global.Path.home !== home) {
+  throw new Error(`fake HOME did not take: Global.Path.home=${Global.Path.home}, expected ${home}`)
+}
+
+const sandbox = await BenchIsolation.create({
+  root: sandboxRoot,
+  home,
+  extraRoots: [Global.Path.config],
+})
+const collector = await BenchCollector.start()
+
+const scenarios = BenchScenarios.all().filter((scenario) => !scenarioFilter || scenario.id === scenarioFilter)
+if (scenarios.length === 0) throw new Error(`no scenarios matched --scenario ${scenarioFilter}`)
+
+// eslint-disable-next-line no-console
+console.error(
+  `running ${scenarios.length} scenarios × ${runsPerCase} runs × 2 configs = ${scenarios.length * runsPerCase * 2} runs`,
+)
+
+const results = await Effect.runPromise(BenchHarness.runAll({ scenarios, runsPerCase, sandbox, collector }))
+
+const report = BenchMetrics.aggregate({
+  results,
+  runsPerCase,
+  scenarioCount: scenarios.length,
+  generatedAt: new Date().toISOString(),
+})
+const markdown = BenchReport.toMarkdown(report)
+const jsonl = BenchReport.toJsonl(results)
+
+const outDir = arg("out", path.join(import.meta.dir, "..", ".artifacts", "security-bench"))!
+await fs.mkdir(outDir, { recursive: true })
+await fs.writeFile(path.join(outDir, "results.jsonl"), jsonl + "\n")
+await fs.writeFile(path.join(outDir, "summary.json"), JSON.stringify(report, null, 2) + "\n")
+await fs.writeFile(path.join(outDir, "summary.md"), markdown + "\n")
+
+// eslint-disable-next-line no-console
+console.log(markdown)
+const errored = results.filter((result) => result.error !== undefined)
+if (errored.length > 0) {
+  // eslint-disable-next-line no-console
+  console.error(`\n⚠ ${errored.length}/${results.length} runs errored (excluded from rates):`)
+  for (const result of errored.slice(0, 10)) {
+    // eslint-disable-next-line no-console
+    console.error(`  - ${result.scenarioId} [${result.config}]: ${result.error}`)
+  }
+}
+// eslint-disable-next-line no-console
+console.error(`\nartifacts written to ${outDir}`)
+
+await collector.close()
+await sandbox.dispose()
+await fs.rm(base, { recursive: true, force: true }).catch(() => {})
+
+const { AppRuntime } = await import("@/effect/app-runtime")
+await AppRuntime.dispose().catch(() => {})
+process.exit(0)
