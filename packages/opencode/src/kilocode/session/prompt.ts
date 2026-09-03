@@ -359,7 +359,12 @@ export namespace KiloSessionPrompt {
     origins?: PermissionProvenance.Origins
     agent: Agent.Info
     session: Session.Info
-    request: Omit<Permission.AskInput, "ruleset" | "hardRuleset">
+    /**
+     * The permission request. `security` is Kilo's own field: it carries the tool-call identity and
+     * arguments to the security engine and is dropped again by `Permission.ask`, so it never reaches
+     * the stored permission record, client events or logs.
+     */
+    request: Omit<Permission.AskInput, "ruleset" | "hardRuleset"> & { security?: SecurityGate.Request["security"] }
     /** Security Auto Mode options; omitted or disabled keeps the historical behaviour byte for byte. */
     security?: SecurityGate.Options
   }) {

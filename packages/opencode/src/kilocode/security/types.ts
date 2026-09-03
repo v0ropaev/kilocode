@@ -39,6 +39,8 @@ export type SecurityReasonCode =
   | "PACKAGE_LIFECYCLE"
   /** An outbound action would carry credential material observed earlier in the session. */
   | "SECRET_EXFILTRATION"
+  /** A tool whose authority the engine cannot establish (unclassified, custom, or MCP-delegated). */
+  | "DELEGATED_AUTHORITY"
   | "POLICY_TAMPERING"
   | "SANDBOX_ESCALATION"
   | "UNCLASSIFIED_ACTION"
@@ -191,6 +193,87 @@ export type NormalizedAction =
   | { kind: "shell"; permission: string; command: NormalizedCommand }
   | { kind: "file"; permission: string; effect: FileEffect; paths: NormalizedPath[] }
   | { kind: "permission"; permission: string; patterns: string[] }
+
+/**
+ * Where a tool's implementation comes from, structurally. This is never self-declared: it is read
+ * from the marker the registry / MCP client sets on the tool object, so a lower-trust source cannot
+ * raise its own trust level by claiming a different origin.
+ */
+export type ToolProvenance =
+  /** Shipped with Kilo and marked as built-in by the tool registry. */
+  | "builtin"
+  /** Loaded from the user's own global config directory (user/admin trusted configuration). */
+  | "trusted-config"
+  /** Loaded from a project / workspace directory: controlled by whoever controls the repository. */
+  | "workspace"
+  /** Contributed by a configured plugin. */
+  | "plugin"
+  /** A locally launched MCP server. */
+  | "mcp-local"
+  /** A remote MCP server: delegated authority that executes outside this machine. */
+  | "mcp-remote"
+  /** Dynamic or unattributable. */
+  | "unknown"
+
+/** What a tool is authorised to do. A tool may hold several capabilities. */
+export type ToolCapabilityName =
+  | "readonly"
+  | "filesystem-read"
+  | "filesystem-write"
+  | "process"
+  | "network"
+  | "package"
+  | "delegated-authority"
+  | "security-control"
+  | "unknown"
+
+/** Structured identity of an MCP operation, carried into every MCP security decision. */
+export interface McpIdentity {
+  /** Configured server name (the identity the user granted authority to). */
+  server: string
+  /** Tool name as the server published it. */
+  tool: string
+  /** True when the server runs outside this machine; absent when the call is not a direct tool call. */
+  remote?: boolean
+  /** Resource URI when the operation targets an MCP resource rather than a tool. */
+  resource?: string
+}
+
+/**
+ * The security-relevant identity of a tool call: what the tool is, where it came from and what it
+ * is allowed to do. Assembled from structural markers and the capability table / user declarations,
+ * never from the tool's own natural-language description.
+ */
+export interface ToolDescriptor {
+  /** Tool id as the model called it (also the permission key). */
+  tool: string
+  provenance: ToolProvenance
+  capabilities: ToolCapabilityName[]
+  /**
+   * How the capability set was established:
+   * - `builtin`: Kilo's own classification table;
+   * - `declared`: the user's global-config declaration for this tool;
+   * - `unknown`: nothing vouches for this tool — the conservative floor applies.
+   */
+  source: "builtin" | "declared" | "unknown"
+  /** True when the tool performs its own permission ask before its side effect. */
+  asks: boolean
+  mcp?: McpIdentity
+  /**
+   * Hints published by the tool itself (MCP annotations, plugin metadata). The source is lower
+   * trust than the policy, so these may only tighten a decision and never relax one.
+   */
+  hints?: { readOnly?: boolean; destructive?: boolean; openWorld?: boolean }
+}
+
+/**
+ * A tool call handed to the security layer. `args` stay in process: they are inspected for paths,
+ * URLs and credential material and are never copied into session state, metadata, logs or audit.
+ */
+export interface ToolInvocation {
+  descriptor: ToolDescriptor
+  args: Record<string, unknown>
+}
 
 export interface SecurityContext {
   sessionID: string

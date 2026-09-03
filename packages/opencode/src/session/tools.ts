@@ -32,6 +32,8 @@ import { McpApps } from "@/kilocode/mcp/apps"
 import { InstanceState } from "@/effect/instance-state"
 import { SecurityGate } from "@/kilocode/security/gate"
 import { SecurityKeys } from "@/kilocode/security/keys"
+import { ToolOrigin } from "@/kilocode/security/tool/origin"
+import type { SecurityDeniedError } from "@/kilocode/security/error"
 import { SecuritySessionState } from "@/kilocode/security/state/store" // kilocode_change
 import { KiloSession } from "@/kilocode/session" // kilocode_change
 // kilocode_change end
@@ -39,8 +41,16 @@ import { isRecord } from "@/util/record"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 
 // kilocode_change start: the security session-state layer keys state by the root session, so a
-// sub-agent's sensitive read is visible to its parent. Resolve the root through Kilo's session graph.
-SecuritySessionState.useRootResolver((id) => KiloSession.resolveRoot(id))
+// sub-agent's sensitive read is visible to its parent. Resolve the root through Kilo's session graph,
+// with the same defensive fallback the other consumers of that map use (session/llm.ts,
+// session/compaction.ts): when the root map has no entry but the parent map does, the parent is the
+// best available root. A child prompted in a process that never created it still resolves to itself —
+// that gap needs a durable ancestry query and is recorded as a limitation.
+SecuritySessionState.useRootResolver((id) => {
+  const found = KiloSession.resolveRoot(id)
+  if (found !== id) return found
+  return KiloSession.resolveParent(id) ?? id
+})
 // kilocode_change end
 
 const MCP_RESOURCE_TOOLS = {
@@ -111,12 +121,38 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     workspace: { directory: instance.directory, worktree: instance.worktree },
   })
   // kilocode_change end
-  const context = (args: Record<string, unknown>, options: ToolExecutionOptions): Tool.Context => {
+  // kilocode_change start - structural identity of the tool behind each call
+  const toolInvocation = (item: object, id: string, args: unknown) =>
+    SecurityGate.describe({ tool: id, provenance: ToolOrigin.provenance(item), args, options: security })
+
+  const mcpInvocation = (entry: MCP.McpTool, key: string, args: unknown) => {
+    const annotations = (entry.def as { annotations?: Record<string, unknown> }).annotations
+    const hint = (name: string) =>
+      typeof annotations?.[name] === "boolean" ? (annotations[name] as boolean) : undefined
+    return SecurityGate.describe({
+      tool: key,
+      provenance: ToolOrigin.mcpProvenance(entry),
+      args,
+      options: security,
+      mcp: { server: entry.clientName, tool: entry.def.name, remote: ToolOrigin.mcpProvenance(entry) === "mcp-remote" },
+      hints: { readOnly: hint("readOnlyHint"), destructive: hint("destructiveHint"), openWorld: hint("openWorldHint") },
+    })
+  }
+  // kilocode_change end
+
+  // kilocode_change start - `invocation` carries the security identity of the call being made
+  const context = (
+    args: Record<string, unknown>,
+    options: ToolExecutionOptions,
+    invocation?: SecurityGate.Request["security"],
+  ): Tool.Context => {
+    // kilocode_change end
     const extra = {
       model: input.model,
       bypassAgentCheck: input.bypassAgentCheck,
       promptOps: input.promptOps,
       sandboxed, // kilocode_change
+      security, // kilocode_change - lets a delegating tool build a descriptor for its real callee
       sandboxEscalation: false,
     }
     return {
@@ -141,6 +177,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             ...req,
             sessionID: input.session.id,
             tool: { messageID: input.processor.message.id, callID: options.toolCallId },
+            // kilocode_change - a tool that delegates (code mode → MCP) names the real callee itself;
+            // otherwise the identity of the tool being executed applies
+            ...((req.security ?? invocation) ? { security: req.security ?? invocation } : {}),
           },
           security,
         }).pipe(
@@ -206,7 +245,11 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       execute(args, options) {
         return run.promise(
           Effect.gen(function* () {
-            const ctx = context(args, options)
+            // kilocode_change start - the descriptor is built from the registry's own markers, before
+            // the plugin hook can touch the arguments, so a hook cannot change what the tool *is*
+            const invocation = toolInvocation(item, item.id, args)
+            const ctx = context(args, options, invocation)
+            // kilocode_change end
             yield* plugin.trigger(
               "tool.execute.before",
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
@@ -216,11 +259,15 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             const result = yield* SandboxPolicy.executeTool(
               ctx.sessionID,
               item,
-              SecurityGate.execute({ ctx, tool: item.id, options: security }, item.execute(args, ctx)),
+              SecurityGate.execute({ ctx, tool: item.id, options: security, invocation }, item.execute(args, ctx)),
             )
             // kilocode_change end
+            const provenance = SecurityGate.resultProvenance(invocation?.descriptor) // kilocode_change
             const output = {
               ...result,
+              // kilocode_change start - audit foundation: mark results that came from outside Kilo
+              ...(provenance ? { metadata: { ...result.metadata, [SecurityKeys.PROVENANCE]: provenance } } : {}),
+              // kilocode_change end
               attachments: result.attachments?.map((attachment) => ({
                 ...attachment,
                 id: PartID.ascending(),
@@ -265,7 +312,20 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         return run.promise(
           Effect.gen(function* () {
             const parsed = parseListMcpResourcesArgs(args)
-            const ctx = context(toRecord(args), opts)
+            // kilocode_change - identity of the delegated listing for the security decision
+            // kilocode_change start - identity of the delegated listing for the security decision
+            const ctx = context(
+              toRecord(args),
+              opts,
+              SecurityGate.describe({
+                tool: MCP_RESOURCE_TOOLS.list,
+                provenance: "builtin",
+                args,
+                options: security,
+                ...(parsed.server ? { mcp: { server: parsed.server, tool: MCP_RESOURCE_TOOLS.list } } : {}),
+              }),
+            )
+            // kilocode_change end
             const clients = yield* mcp.clients()
             const resourceServers = Object.entries(clients)
               .filter((entry) => !!entry[1].getServerCapabilities()?.resources)
@@ -345,7 +405,20 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         return run.promise(
           Effect.gen(function* () {
             const parsed = parseListMcpResourcesArgs(args)
-            const ctx = context(toRecord(args), opts)
+            // kilocode_change - identity of the delegated listing for the security decision
+            // kilocode_change start - identity of the delegated listing for the security decision
+            const ctx = context(
+              toRecord(args),
+              opts,
+              SecurityGate.describe({
+                tool: MCP_RESOURCE_TOOLS.listTemplates,
+                provenance: "builtin",
+                args,
+                options: security,
+                ...(parsed.server ? { mcp: { server: parsed.server, tool: MCP_RESOURCE_TOOLS.listTemplates } } : {}),
+              }),
+            )
+            // kilocode_change end
             const clients = yield* mcp.clients()
             const resourceServers = Object.entries(clients)
               .filter((entry) => !!entry[1].getServerCapabilities()?.resources)
@@ -429,7 +502,20 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         return run.promise(
           Effect.gen(function* () {
             const parsed = parseReadMcpResourceArgs(args)
-            const ctx = context(toRecord(args), opts)
+            // kilocode_change - server + resource URI reach the security decision, not just "read"
+            // kilocode_change start - server + resource URI reach the security decision, not just "read"
+            const ctx = context(
+              toRecord(args),
+              opts,
+              SecurityGate.describe({
+                tool: MCP_RESOURCE_TOOLS.read,
+                provenance: "builtin",
+                args,
+                options: security,
+                mcp: { server: parsed.server, tool: MCP_RESOURCE_TOOLS.read, resource: parsed.uri },
+              }),
+            )
+            // kilocode_change end
             const clients = yield* mcp.clients()
             const client = clients[parsed.server]
             if (!client) {
@@ -496,10 +582,22 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     const schema = yield* Effect.promise(() => Promise.resolve(asSchema(item.inputSchema).jsonSchema))
     const transformed = ProviderTransform.schema(input.model, { ...schema, properties: schema.properties ?? {} })
     item.inputSchema = jsonSchema(transformed)
+    // kilocode_change start - a security denial becomes a result the agent can read, not a defect that
+    // ends the turn; the remote call itself never happens (the ask fails before `execute`)
+    type McpResult = Awaited<ReturnType<NonNullable<typeof execute>>>
+    const denied = (error: SecurityDeniedError) =>
+      ({
+        content: [{ type: "text", text: error.result(key).output }],
+        metadata: { security: error.blocked() },
+      }) as McpResult
+    // kilocode_change end
     item.execute = (args, opts) =>
       run.promise(
         Effect.gen(function* () {
-          const ctx = context(args, opts)
+          // kilocode_change start - the MCP identity reaches the decision, not just the tool key
+          const invocation = mcpInvocation(entry, key, args)
+          const ctx = context(args, opts, invocation)
+          // kilocode_change end
           // kilocode_change start - propagate MCP App UI metadata so hosts can preload the UI resource
           const mcpAppMeta = McpApps.toolMetadata(entry, flags)
           if (mcpAppMeta) {
@@ -512,13 +610,19 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             { args },
           )
           // kilocode_change start
-          const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* SandboxPolicy.executeMcp(
+          const result: McpResult = yield* SandboxPolicy.executeMcp(
             ctx.sessionID,
             entry, // kilocode_change - retain the native entry's local/remote network authority marker
-            Effect.gen(function* () {
-              yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
-              return yield* Effect.promise(() => execute(args, opts))
-            }),
+            // kilocode_change - the security gate wraps the delegated call the same way it wraps a
+            // built-in one: settle the session state, and turn a denial into a structured result
+            SecurityGate.delegate(
+              { ctx, tool: key, options: security },
+              denied,
+              Effect.gen(function* () {
+                yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
+                return yield* Effect.promise(() => execute(args, opts))
+              }),
+            ),
           ).pipe(
             // kilocode_change end
             Effect.withSpan("Tool.execute", {
@@ -575,11 +679,15 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           }
 
           const truncated = yield* truncate.output(textParts.join("\n\n"), {}, input.agent)
+          const provenance = SecurityGate.resultProvenance(invocation?.descriptor) // kilocode_change
           const metadata = {
             ...result.metadata,
             truncated: truncated.truncated,
             ...(truncated.truncated && { outputPath: truncated.outputPath }),
             ...mcpAppMeta, // kilocode_change - MCP App UI metadata
+            // kilocode_change start - audit foundation: this content came from an MCP server, not Kilo
+            ...(provenance ? { [SecurityKeys.PROVENANCE]: provenance } : {}),
+            // kilocode_change end
           }
 
           const output = {

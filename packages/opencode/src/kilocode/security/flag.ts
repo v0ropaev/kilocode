@@ -1,5 +1,6 @@
 import { Effect } from "effect"
 import { Config } from "@/config/config"
+import { ToolCapability } from "./tool/capability"
 
 /**
  * Security Auto Mode is off by default. It is enabled from user-owned state only: the global Kilo
@@ -7,10 +8,12 @@ import { Config } from "@/config/config"
  * Project config is deliberately ignored so a repository cannot turn the mode on or off, and the
  * global config directory is itself protected from agent writes by the engine's hard rules.
  *
- * The v2 layers (package provenance preflight, stateful secret-egress protection) follow the same
- * rule: on by default whenever the mode is on, switchable off individually from the global config
- * (`experimental.security_auto_packages`, `experimental.security_auto_egress`) or the environment
- * (`KILO_SECURITY_AUTO_PACKAGES`, `KILO_SECURITY_AUTO_EGRESS`). They are never read from a project.
+ * The layers (package provenance preflight, stateful secret-egress protection, delegated-authority
+ * classification of MCP / custom tools) follow the same rule: on by default whenever the mode is on,
+ * switchable off individually from the global config (`experimental.security_auto_packages`,
+ * `experimental.security_auto_egress`, `experimental.security_auto_tools`) or the environment
+ * (`KILO_SECURITY_AUTO_PACKAGES`, `KILO_SECURITY_AUTO_EGRESS`, `KILO_SECURITY_AUTO_TOOLS`). They are
+ * never read from a project.
  */
 export namespace SecurityFlag {
   export interface Layers {
@@ -18,6 +21,8 @@ export namespace SecurityFlag {
     packages: boolean
     /** Stateful sensitive-read → outbound-egress protection. */
     egress: boolean
+    /** Delegated-authority classification of MCP / custom / unclassified tools. */
+    tools: boolean
   }
 
   function truthy(value: string | undefined) {
@@ -41,13 +46,26 @@ export namespace SecurityFlag {
     return configured !== false
   }
 
-  /** Which v2 layers are active. Meaningful only when {@link enabled} is true. */
+  /** Which layers are active. Meaningful only when {@link enabled} is true. */
   export const layers = Effect.fn("SecurityFlag.layers")(function* (config: Pick<Config.Interface, "getGlobal">) {
     const global = yield* config.getGlobal().pipe(Effect.catch(() => Effect.succeed(undefined)))
     const result: Layers = {
       packages: layer(process.env["KILO_SECURITY_AUTO_PACKAGES"], global?.experimental?.security_auto_packages),
       egress: layer(process.env["KILO_SECURITY_AUTO_EGRESS"], global?.experimental?.security_auto_egress),
+      tools: layer(process.env["KILO_SECURITY_AUTO_TOOLS"], global?.experimental?.security_auto_tools),
     }
     return result
+  })
+
+  /**
+   * Capability declarations for tools the user vouches for (`experimental.security_auto_tool_capabilities`).
+   * Global config only, for the same reason the mode itself is: a repository must not be able to
+   * declare capabilities for the tools it also ships.
+   */
+  export const declarations = Effect.fn("SecurityFlag.declarations")(function* (
+    config: Pick<Config.Interface, "getGlobal">,
+  ) {
+    const global = yield* config.getGlobal().pipe(Effect.catch(() => Effect.succeed(undefined)))
+    return ToolCapability.declarations(global?.experimental?.security_auto_tool_capabilities)
   })
 }

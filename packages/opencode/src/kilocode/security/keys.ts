@@ -9,4 +9,10 @@ export namespace SecurityKeys {
   export const META = "security" as const
   /** Set on envelope asks issued by the execution gate for tools without their own permission ask. */
   export const ENVELOPE = "securityEnvelope" as const
+  /**
+   * Provenance marker attached to a tool result's metadata. Audit foundation
+   * only: it records where the content came from so later layers and clients can treat a workspace
+   * or MCP result as untrusted context. Nothing reads it as policy today and no content is rewritten.
+   */
+  export const PROVENANCE = "securityProvenance" as const
 }

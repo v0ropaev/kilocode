@@ -22,13 +22,19 @@ import { PackageOperation } from "./package/operation"
 import { PackageRiskEvaluator } from "./package/evaluator"
 import { SecuritySessionState } from "./state/store"
 import { EgressGuard } from "./state/egress"
+import { ToolAuthority } from "./tool/authority"
+import { ToolCapability } from "./tool/capability"
 import type {
   FileEffect,
+  McpIdentity,
   NormalizedAction,
   NormalizedPath,
   SecurityContext,
   SecurityDecision,
   SecurityEvidence,
+  ToolDescriptor,
+  ToolInvocation,
+  ToolProvenance,
 } from "./types"
 
 /**
@@ -51,16 +57,25 @@ export namespace SecurityGate {
     sandboxed: boolean
     workspace: { directory: string; worktree: string }
     /**
-     * Security Auto layers. Absent means "engine only" so callers that build options by hand keep the
-     * v1 behaviour; {@link options} fills it from the global config (both on by default).
+     * Evidence layers above the deterministic engine. Absent means "engine only", so callers that
+     * build options by hand keep that behaviour; {@link options} fills it from the global config
+     * (all on by default).
      */
     layers?: SecurityFlag.Layers
+    /** Tool capabilities the user vouches for, from the global config. */
+    declarations?: ToolCapability.Declarations
   }
 
   export type Request = Omit<PermissionV1.Request, "id" | "tool" | "sessionID"> & {
     sessionID?: string
     /** Tool call the ask belongs to; lets the session-state layer link an ask to its execution. */
     tool?: { messageID: string; callID: string }
+    /**
+     * Identity and arguments of the tool call this ask belongs to. Deliberately
+     * *not* part of `metadata`: the arguments stay in process and never reach the permission record,
+     * client events, logs or audit. Absent when the mode or the tool layer is off.
+     */
+    security?: ToolInvocation
   }
 
   export interface Summary {
@@ -71,58 +86,14 @@ export namespace SecurityGate {
     rules: string[]
   }
 
-  /** Tools that never have side effects and need no envelope ask. */
-  const READONLY = new Set([
-    "question",
-    "suggest",
-    "plan_enter",
-    "plan_exit",
-    "invalid",
-    "agent_manager_models",
-    "chart",
-    "todoread",
-    "list",
-    "codesearch",
-    "diagnostics",
-  ])
-
-  /** Built-in tools that call `ctx.ask` before their side effect; the ask-level gate covers them. */
-  const ASKING = new Set([
-    "bash",
-    "edit",
-    "write",
-    "apply_patch",
-    "read",
-    "glob",
-    "grep",
-    "task",
-    "skill",
-    "webfetch",
-    "websearch",
-    "repo_clone",
-    "repo_overview",
-    "lsp",
-    "todowrite",
-    "execute",
-    "kilo_local_recall",
-    "kilo_memory_recall",
-    "kilo_memory_save",
-    "background_process",
-    "interactive_terminal",
-    "agent_manager",
-    "board_read",
-    "board_post",
-    "browser_open",
-    "generate_image",
-    "notebook_read",
-    "notebook_edit",
-    "notebook_execute",
-    "send_file",
-    "semantic_search",
-    "list_mcp_resources",
-    "list_mcp_resource_templates",
-    "read_mcp_resource",
-  ])
+  /**
+   * Tools that never have side effects, and tools that call `ctx.ask` themselves before their side
+   * effect: both need no envelope ask. Derived from the capability table so the classification lives
+   * in exactly one place — a tool cannot be added to the table and forgotten here, or listed here
+   * without a classification.
+   */
+  const READONLY = ToolCapability.READONLY
+  const ASKING = ToolCapability.ASKING
 
   export const options = Effect.fn("SecurityGate.options")(function* (input: {
     config: Pick<Config.Interface, "getGlobal">
@@ -130,10 +101,74 @@ export namespace SecurityGate {
     workspace: { directory: string; worktree: string }
   }) {
     const enabled = yield* SecurityFlag.enabled(input.config)
-    const layers = enabled ? yield* SecurityFlag.layers(input.config) : { packages: false, egress: false }
-    const result: Options = { enabled, sandboxed: input.sandboxed, workspace: input.workspace, layers }
+    const layers = enabled ? yield* SecurityFlag.layers(input.config) : { packages: false, egress: false, tools: false }
+    const declarations = enabled && layers.tools ? yield* SecurityFlag.declarations(input.config) : []
+    const result: Options = { enabled, sandboxed: input.sandboxed, workspace: input.workspace, layers, declarations }
     return result
   })
+
+  /**
+   * Build the security descriptor for a tool call. Called at each execution site, where the tool's
+   * structural provenance is known; returns nothing when the mode or the tool layer is off, so a
+   * disabled feature adds no field to any request.
+   */
+  export function describe(input: {
+    tool: string
+    provenance: ToolProvenance
+    args: unknown
+    options: Options
+    mcp?: McpIdentity
+    hints?: ToolDescriptor["hints"]
+  }): ToolInvocation | undefined {
+    if (!input.options.enabled || input.options.layers?.tools !== true) return undefined
+    const args = typeof input.args === "object" && input.args !== null ? (input.args as Record<string, unknown>) : {}
+    try {
+      const descriptor = ToolCapability.resolve({
+        tool: input.tool,
+        provenance: input.provenance,
+        declarations: input.options.declarations,
+        ...(input.mcp ? { mcp: input.mcp } : {}),
+        ...(input.hints ? { hints: input.hints } : {}),
+      })
+      return { descriptor, args }
+    } catch {
+      // Failing to classify is uncertainty, never permission: fall back to the most conservative
+      // descriptor rather than dropping the layer (which would leave the call unclassified).
+      return {
+        descriptor: {
+          tool: input.tool,
+          provenance: "unknown",
+          capabilities: [],
+          source: "unknown",
+          asks: false,
+        },
+        args,
+      }
+    }
+  }
+
+  /**
+   * Provenance label for a tool *result* (§tool-result provenance). Audit only:
+   * it records that the content in this result came from outside Kilo. No content is inspected,
+   * rewritten or filtered, and nothing reads this label as policy today.
+   */
+  export function resultProvenance(descriptor: ToolDescriptor | undefined): string | undefined {
+    if (!descriptor) return undefined
+    switch (descriptor.provenance) {
+      case "builtin":
+        return undefined
+      case "mcp-remote":
+        return "remote-untrusted"
+      case "mcp-local":
+        return "mcp-untrusted"
+      case "trusted-config":
+        return "config-untrusted"
+      case "plugin":
+        return "plugin-untrusted"
+      default:
+        return "workspace-untrusted"
+    }
+  }
 
   export function summary(decision: SecurityDecision): Summary {
     return {
@@ -316,7 +351,7 @@ export namespace SecurityGate {
       home: Global.Path.home,
       sandbox: { enabled: input.options.sandboxed },
     }
-    const layers = input.options.layers ?? { packages: false, egress: false }
+    const layers = input.options.layers ?? { packages: false, egress: false, tools: false }
     const callID = input.request.tool?.callID
     const started = performance.now()
     const exit = yield* Effect.exit(
@@ -334,6 +369,18 @@ export namespace SecurityGate {
           const egress = EgressGuard.assess({ action, sessionID: input.sessionID })
           if (callID !== undefined) SecuritySessionState.recordPending(input.sessionID, callID, egress.pending)
           decision = SecurityEngine.extend(decision, egress.evidence)
+        }
+        if (layers.tools && input.request.security) {
+          // Delegated authority: what the tool is allowed to do, who wrote it, and what its arguments
+          // touch. Folded through the same reducer, so it can only tighten earlier decisions.
+          const authority = ToolAuthority.assess({
+            invocation: input.request.security,
+            ctx,
+            env,
+            sessionID: input.sessionID,
+          })
+          if (callID !== undefined) SecuritySessionState.recordPending(input.sessionID, callID, authority.pending)
+          decision = SecurityEngine.extend(decision, authority.evidence)
         }
         return decision
       }),
@@ -419,20 +466,25 @@ export namespace SecurityGate {
    * never becomes "secret context".
    */
   export function execute<A extends Tool.ExecuteResult, E, R>(
-    input: { ctx: Tool.Context; tool: string; options: Options },
+    input: { ctx: Tool.Context; tool: string; options: Options; invocation?: ToolInvocation },
     effect: Effect.Effect<A, E, R>,
   ): Effect.Effect<A | Tool.ExecuteResult, E, R> {
     if (!input.options.enabled) return effect
     const callID = input.ctx.callID
     const sessionID = input.ctx.sessionID
+    // A tool that Kilo did not ship cannot be trusted to ask for permission on its own, and cannot be
+    // trusted to report honestly that it was blocked. Both facts follow from provenance alone.
+    const trusted = input.invocation === undefined || input.invocation.descriptor.provenance === "builtin"
     const settle = (committed: boolean) =>
       Effect.sync(() => {
         if (!input.options.layers?.egress || callID === undefined) return
         if (committed) SecuritySessionState.commit(sessionID, callID, secretSource)
         else SecuritySessionState.discard(sessionID, callID)
       })
+    // Tool-id shadowing: a workspace or plugin tool may call itself `read` or `list`. The envelope is
+    // skipped only for a genuine built-in, so borrowing a built-in's name buys nothing.
     const envelope =
-      READONLY.has(input.tool) || ASKING.has(input.tool)
+      trusted && (READONLY.has(input.tool) || ASKING.has(input.tool))
         ? Effect.void
         : input.ctx.ask({
             permission: input.tool,
@@ -443,17 +495,50 @@ export namespace SecurityGate {
     return envelope.pipe(
       Effect.andThen(effect),
       Effect.tap((result) => {
-        // A tool may convert a denial into a structured blocked result rather than failing; a blocked
-        // result means the side effect did not happen, so discard rather than commit.
+        // A built-in tool may convert a denial into a structured blocked result rather than failing; a
+        // blocked result means the side effect did not happen, so discard rather than commit. The same
+        // marker from a tool Kilo did not ship is just tool-controlled text: honouring it would let a
+        // custom tool read a credential and then declare itself blocked to erase the session's record.
         const security = (result.metadata as { security?: { status?: string } } | undefined)?.security
-        const blocked = security?.status === "blocked" || result.title === "Blocked by security policy"
-        return settle(!blocked)
+        const claimed = security?.status === "blocked" || result.title === "Blocked by security policy"
+        return settle(!(claimed && trusted))
       }),
       Effect.catchCause((cause) => {
         const err = Cause.squash(cause)
         if (!SecurityDeniedError.isInstance(err)) return settle(false).pipe(Effect.andThen(Effect.failCause(cause)))
         log.info("blocked", { tool: input.tool, reason: err.reasonCode })
         return settle(false).pipe(Effect.as(err.result(input.tool)))
+      }),
+    )
+  }
+
+  /**
+   * Execution gate for a delegated (MCP) call. Such a call asks for permission explicitly, so it gets
+   * no envelope ask; what it gains here is the rest of the envelope's job: the session-state settle,
+   * and turning a security denial into a structured result the agent can read instead of a defect
+   * that ends the turn.
+   */
+  export function delegate<A, E, R>(
+    input: { ctx: Tool.Context; tool: string; options: Options },
+    blocked: (error: SecurityDeniedError) => A,
+    effect: Effect.Effect<A, E, R>,
+  ): Effect.Effect<A, E, R> {
+    if (!input.options.enabled) return effect
+    const callID = input.ctx.callID
+    const sessionID = input.ctx.sessionID
+    const settle = (committed: boolean) =>
+      Effect.sync(() => {
+        if (!input.options.layers?.egress || callID === undefined) return
+        if (committed) SecuritySessionState.commit(sessionID, callID, secretSource)
+        else SecuritySessionState.discard(sessionID, callID)
+      })
+    return effect.pipe(
+      Effect.tap(() => settle(true)),
+      Effect.catchCause((cause) => {
+        const err = Cause.squash(cause)
+        if (!SecurityDeniedError.isInstance(err)) return settle(false).pipe(Effect.andThen(Effect.failCause(cause)))
+        log.info("blocked", { tool: input.tool, reason: err.reasonCode })
+        return settle(false).pipe(Effect.as(blocked(err)))
       }),
     )
   }

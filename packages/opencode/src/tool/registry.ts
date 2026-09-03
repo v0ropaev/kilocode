@@ -68,6 +68,8 @@ import { Git } from "@/git" // kilocode_change
 import { BackgroundJob } from "@/background/job"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import * as ToolNetwork from "@/kilocode/sandbox/network" // kilocode_change
+import { ToolOrigin } from "@/kilocode/security/tool/origin" // kilocode_change
+import { Global } from "@opencode-ai/core/global" // kilocode_change
 import { MemoryService } from "@kilocode/kilo-memory/effect/service" // kilocode_change
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -229,21 +231,30 @@ const layer = Layer.effect(
           Glob.scanSync("{tool,tools}/*.{js,ts}", { cwd: dir, absolute: true, dot: true, symlink: true }),
         )
         if (matches.length) yield* config.waitForDependencies()
+        // kilocode_change start - tools loaded from the user's own global config directory are a
+        // different trust level from tools a checked-out repository ships; record which is which
+        const globalDir = path.resolve(Global.Path.config)
+        // kilocode_change end
         for (const match of matches) {
           const namespace = path.basename(match, path.extname(match))
+          const origin = path.resolve(match).startsWith(globalDir + path.sep) ? "trusted-config" : "workspace" // kilocode_change
           // `match` is an absolute filesystem path from `Glob.scanSync(..., { absolute: true })`.
           // Import it as `file://` so Node on Windows accepts the dynamic import.
           const mod = yield* Effect.promise(() => import(pathToFileURL(match).href))
           for (const [id, def] of Object.entries(mod)) {
             if (!isPluginTool(def)) continue
-            custom.push(fromPlugin(id === "default" ? namespace : `${namespace}_${id}`, def))
+            // kilocode_change start - record the tool's structural origin for the security layer
+            custom.push(
+              ToolOrigin.mark(fromPlugin(id === "default" ? namespace : `${namespace}_${id}`, def), origin),
+            )
+            // kilocode_change end
           }
         }
 
         const plugins = yield* plugin.list()
         for (const p of plugins) {
           for (const [id, def] of Object.entries(p.tool ?? {})) {
-            custom.push(fromPlugin(id, def))
+            custom.push(ToolOrigin.mark(fromPlugin(id, def), "plugin")) // kilocode_change
           }
         }
 
@@ -407,7 +418,11 @@ const layer = Layer.effect(
             execute: tool.execute,
             formatValidationError: tool.formatValidationError,
           }
-          return ToolNetwork.isBuiltin(tool) ? ToolNetwork.builtin(result) : result
+          // kilocode_change - the rebuilt definition must keep the markers the security layer reads:
+          // the built-in marker, or the recorded origin of a custom / plugin tool
+          if (ToolNetwork.isBuiltin(tool)) return ToolNetwork.builtin(result)
+          const origin = ToolOrigin.of(tool)
+          return origin ? ToolOrigin.mark(result, origin) : result
           // kilocode_change end
         }),
         { concurrency: "unbounded" },

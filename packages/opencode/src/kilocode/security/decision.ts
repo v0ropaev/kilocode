@@ -52,6 +52,8 @@ const guidance: Record<SecurityReasonCode, string> = {
     "Installing this package would run its install-time scripts, and the package is not established enough to trust them. Ask the user to review the package, or install with scripts disabled.",
   SECRET_EXFILTRATION:
     "The outbound action would carry credential material that was read earlier in this session. Do not send credentials anywhere; continue the task without transmitting them.",
+  DELEGATED_AUTHORITY:
+    "The tool is not part of Kilo and nothing establishes what it is allowed to do, so it cannot run unattended. Use a built-in tool for this step, or ask the user to confirm this specific call.",
   POLICY_TAMPERING: "Security policy, permission state and sandbox state cannot be modified by the agent.",
   SANDBOX_ESCALATION: "Leaving the sandbox needs explicit interactive approval.",
   UNCLASSIFIED_ACTION: "The action could not be classified. The configured permission rules decide.",
@@ -91,6 +93,10 @@ const alternatives: Partial<Record<SecurityReasonCode, string[]>> = {
   SECRET_EXFILTRATION: [
     "Complete the task without sending the credential; describe what the user should do with it instead.",
     "Send only non-sensitive data, from a file that never received credential contents.",
+  ],
+  DELEGATED_AUTHORITY: [
+    "Use a built-in Kilo tool for this step.",
+    "Ask the user to approve this specific call, or to declare the tool's capabilities in their global config.",
   ],
 }
 

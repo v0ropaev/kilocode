@@ -328,6 +328,16 @@ export const Info = Schema.Struct({
         description:
           "Security Auto Mode layer: track credential reads per session and block outbound actions that would carry that material. On by default when security_auto is on; set false to disable. Global config only.",
       }),
+      security_auto_tools: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Security Auto Mode layer: classify the authority of MCP, plugin and workspace tools before they run, so a tool nothing vouches for cannot execute unattended. On by default when security_auto is on; set false to disable. Global config only.",
+      }),
+      security_auto_tool_capabilities: Schema.optional(
+        Schema.Record(Schema.String, Schema.mutable(Schema.Array(Schema.String))),
+      ).annotate({
+        description:
+          'Capabilities you vouch for, per tool id or glob, e.g. {"docs_*": ["readonly"]}. Recognised values: readonly, filesystem-read, filesystem-write, process, network, package, delegated-authority, security-control. Declared tools take the ordinary permission path instead of the unknown-authority prompt. Global config only.',
+      }),
       // kilocode_change end
       primary_tools: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
         description: "Tools that should only be available to primary agents.",

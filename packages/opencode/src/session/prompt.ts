@@ -20,6 +20,7 @@ import { KiloReference } from "@/kilocode/reference/contains" // kilocode_change
 import { KiloReadObject } from "@/kilocode/tool/read-object" // kilocode_change
 import { isInterrupted } from "@/kilocode/effect/cause" // kilocode_change
 import * as SandboxPolicy from "@/kilocode/sandbox/policy" // kilocode_change
+import { SecurityGate } from "@/kilocode/security/gate" // kilocode_change
 import { CommandTimeout } from "@/kilocode/command-timeout" // kilocode_change
 import { Suggestion } from "@/kilocode/suggestion" // kilocode_change
 import { Question } from "@/question" // kilocode_change
@@ -383,6 +384,19 @@ export const layer = Layer.effect(
       const ctx = yield* InstanceState.context
       const promptOps = yield* ops()
       const { task: taskTool } = yield* registry.named()
+      // kilocode_change start - this path invokes the task tool directly, so it has to resolve the
+      // Security Auto options itself; without them the ask below would skip the security engine.
+      const sandboxed = yield* SandboxPolicy.status(sessionID).pipe(
+        Effect.provideService(Config.Service, config),
+        Effect.provideService(Database.Service, database),
+        Effect.map((status) => status.enabled),
+      )
+      const security = yield* SecurityGate.options({
+        config,
+        sandboxed,
+        workspace: { directory: ctx.directory, worktree: ctx.worktree },
+      })
+      // kilocode_change end
       const taskModel = task.model ? yield* getModel(task.model.providerID, task.model.modelID, sessionID) : model
       const taskVariant = task.variant ?? lastUser.model.variant // kilocode_change
       const assistantMessage: SessionV1.Assistant = yield* sessions.updateMessage({
@@ -494,7 +508,16 @@ export const layer = Layer.effect(
               request: {
                 ...req,
                 sessionID,
+                // kilocode_change - identity of the delegating call, so the engine sees a `task` ask
+                // here exactly as it does on the ordinary tool path
+                security: SecurityGate.describe({
+                  tool: TaskTool.id,
+                  provenance: "builtin",
+                  args: taskArgs,
+                  options: security,
+                }),
               },
+              security, // kilocode_change - was omitted: this ask skipped SecurityGate entirely
             }).pipe(Effect.orDie),
           // kilocode_change end
         })
