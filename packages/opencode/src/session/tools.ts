@@ -29,6 +29,9 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { Config } from "@/config/config"
 import { PermissionProvenance } from "@/kilocode/permission/provenance"
 import { McpApps } from "@/kilocode/mcp/apps"
+import { InstanceState } from "@/effect/instance-state"
+import { SecurityGate } from "@/kilocode/security/gate"
+import { SecurityKeys } from "@/kilocode/security/keys"
 // kilocode_change end
 import { isRecord } from "@/util/record"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -93,6 +96,14 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   const flags = yield* RuntimeFlags.Service
   const restricted = yield* SandboxPolicy.networkRestricted(input.session.id) // kilocode_change
   const sandboxed = (yield* SandboxPolicy.status(input.session.id)).enabled // kilocode_change
+  // kilocode_change start - Security Auto Mode options resolved once per step (off by default)
+  const instance = yield* InstanceState.context
+  const security = yield* SecurityGate.options({
+    config,
+    sandboxed,
+    workspace: { directory: instance.directory, worktree: instance.worktree },
+  })
+  // kilocode_change end
   const context = (args: Record<string, unknown>, options: ToolExecutionOptions): Tool.Context => {
     const extra = {
       model: input.model,
@@ -124,6 +135,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             sessionID: input.session.id,
             tool: { messageID: input.processor.message.id, callID: options.toolCallId },
           },
+          security,
         }).pipe(
           // record why the call was allowed onto the tool part, then discard the outcome for the tool-facing ask
           Effect.tap((approval) =>
@@ -141,6 +153,10 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                 },
               })
             }),
+          ),
+          // record the security decision behind a block so clients can explain it
+          Effect.tapErrorTag("SecurityDeniedError", (err) =>
+            input.processor.metadata(options.toolCallId, { metadata: { [SecurityKeys.META]: err.blocked() } }),
           ),
           // record why the call was denied too, so JSON exports and clients can explain the denial
           Effect.tapErrorTag("PermissionDeniedError", (err) =>
@@ -189,8 +205,12 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
               { args },
             )
-            // kilocode_change start
-            const result = yield* SandboxPolicy.executeTool(ctx.sessionID, item, item.execute(args, ctx))
+            // kilocode_change start - the security gate runs inside the sandbox wrapper: it can only refuse or reshape the result
+            const result = yield* SandboxPolicy.executeTool(
+              ctx.sessionID,
+              item,
+              SecurityGate.execute({ ctx, tool: item.id, options: security }, item.execute(args, ctx)),
+            )
             // kilocode_change end
             const output = {
               ...result,

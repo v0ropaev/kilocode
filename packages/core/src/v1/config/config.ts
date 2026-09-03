@@ -316,6 +316,10 @@ export const Info = Schema.Struct({
       shared_agent_board: Schema.optional(Schema.Boolean).annotate({
         description: "Share discoveries between the main agent and subagents within one session",
       }),
+      security_auto: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Security Auto Mode: adjudicate side-effecting tool calls with a deterministic security policy (ALLOW / ASK / DENY) before the permission prompt. Honoured from the global config only.",
+      }),
       // kilocode_change end
       primary_tools: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
         description: "Tools that should only be available to primary agents.",
