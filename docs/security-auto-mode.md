@@ -13,7 +13,7 @@ Code map verified against commit `f062b0737eb6969644ab3fea7b391b8049401e4a` (202
 - Global config (`~/.config/kilo/kilo.json` or `opencode.json`): `{ "experimental": { "security_auto": true } }`
 - or the environment variable `KILO_SECURITY_AUTO=1` (`0` / `false` forces it off).
 
-Three additional evaluation layers are on whenever the mode is on and can be switched off
+Four additional evaluation layers are on whenever the mode is on and can be switched off
 individually, global config or environment only:
 
 | Layer | Config key | Env | Default |
@@ -21,6 +21,7 @@ individually, global config or environment only:
 | Package provenance preflight | `experimental.security_auto_packages` | `KILO_SECURITY_AUTO_PACKAGES` | on |
 | Stateful secret-egress protection | `experimental.security_auto_egress` | `KILO_SECURITY_AUTO_EGRESS` | on |
 | Delegated-authority classification | `experimental.security_auto_tools` | `KILO_SECURITY_AUTO_TOOLS` | on |
+| Workspace secret-content classification | `experimental.security_auto_content` | `KILO_SECURITY_AUTO_CONTENT` | on |
 
 The delegated-authority layer also reads the capabilities you vouch for, per tool id or glob:
 
@@ -155,11 +156,12 @@ non-destructive mutations, project scripts (`npm test`, `make`, `python script.p
 Package installs, fetch-and-execute (`npx`), outbound network tools, interpreter inline code, writes
 outside the workspace, unrecognised git subcommands and unclassified tools are soft ASK.
 
-## Evaluation layers (v2 / v3)
+## Evidence layers
 
-Three evaluation layers run after the v1 rules and hand structured evidence to the same monotonic
-reducer, so they can only *tighten* a decision — a deterministic v1 DENY / hard ASK is never weakened,
-and their own failures fail safe (a hard ASK, never ALLOW). Each is independently switchable (see
+The evidence layers run after the deterministic rules and hand structured evidence to the same
+monotonic reducer, so they can only *tighten* a decision — a deterministic DENY / hard ASK is never
+weakened, and their own failures fail safe (a hard ASK, never ALLOW). Each is independently
+switchable (see
 [Enabling](#enabling)).
 
 ### Package provenance preflight (`security_auto_packages`)
@@ -250,6 +252,42 @@ tools, plugin tools and workspace (`.kilocode/tool/*.ts`) tools.
   not analyse what a declared `process` tool executes, and does not govern code that runs at module
   load time (see limitations).
 
+### Workspace secret content (`security_auto_content`)
+
+The egress layer decides what is sensitive from the *path*. This one decides it from the *content*, closing
+the class the path-based layers leave open: a real credential living in `src/client.ts`, a project
+JSON, or a runbook. `packages/opencode/src/kilocode/security/state/content.ts`. It extends the egress
+layer and is inert without it.
+
+- **Detectors** are named and explainable, never a score: PEM private-key blocks; vendor credential
+  formats (OpenAI, GitHub, GitLab, Slack, AWS key ids, Google, SendGrid, Stripe, npm, HuggingFace,
+  DigitalOcean, bearer headers); credential-shaped assignments in TS/JS/JSON/YAML/TOML/env/Go/Python,
+  including headers and CRLF; passwords embedded in connection URLs; JWTs *in a credential context*;
+  and a credential keyword next to an opaque value, which is how a token pasted into prose is found.
+- **Entropy is never the proof.** A random-looking string becomes a secret only when a structural
+  signal agrees. The benign shapes that look random are filtered first and explicitly: UUIDs, git
+  SHAs, integrity hashes and checksums, public keys and certificates, template variables
+  (`${API_KEY}`), code references (`process.env.X`), versions, dates, paths, URLs without userinfo,
+  and placeholders — where a placeholder is a value built **entirely** of placeholder words
+  (`YOUR_API_KEY_HERE`, `changeme`), never a substring match, so a real credential containing a common
+  word is not discarded.
+- **Two integration points**, both keyed on something real:
+  - *observed content*: when a tool call succeeds, the output the agent actually received is
+    classified. If it carries credential material, the resources that call read become sensitive and
+    the values are fingerprinted. Nothing is marked from a filename, and a refused or failed call
+    marks nothing at all;
+  - *outbound preflight*: an outbound command or tool that reads a workspace file (`curl --data-binary
+    @src/client.ts`, an MCP upload) has that file classified before it is sent — the agent never
+    obtains the content there, so only this can see it. It sets no state; it produces evidence.
+- **Decision**: everything downstream is the existing egress and delegated-authority policy. A session that obtained credential
+  material has secret context, so a later outbound action is a hard ASK; a command that would send a
+  file whose contents are credential material is a DENY (`hard.egress.secret-content`,
+  `hard.tool.secret-content`).
+- Honest guarantee: *credential material that carries a recognisable marker — a vendor format, a PEM
+  header, a credential-shaped key, or a credential keyword beside it — is recognised wherever it
+  lives, and the session reacts.* It does not decode (base64/hex), does not reassemble values split
+  across lines, and does not call a bare opaque string a secret on entropy alone.
+
 ## Structured safe continuation
 
 A DENY inside a tool becomes a completed tool result titled "Blocked by security policy" whose
@@ -275,6 +313,10 @@ catches repeated identical attempts.
 - a committed sensitive read updates session state and influences later outbound decisions; a
   refused read does not; session state is isolated between sessions and holds no raw secret values; a
   protected egress block happens before the outbound side effect (`test/kilocode/security/egress.test.ts`);
+- a session becomes sensitive only from content a *successful* call actually returned; a refused
+  read never taints; benign-but-random content (lockfiles, hashes, UUIDs, placeholders) does not; raw
+  values never reach state, snapshots or logs — only salted digests and a category
+  (`test/kilocode/security/content.test.ts`);
 - an unknown tool is never a silent ALLOW; a DENY means neither the custom-tool body nor the
   remote MCP call runs; the envelope-ask sets are derived from the capability table and still match the
   base contract exactly; a tool cannot raise its own trust through its id, description, annotations or
@@ -319,6 +361,20 @@ path it names). Confirmed residuals: a declared tool is trusted for *what* it do
 capability, and a secret split across arguments or nested deeper than the bounded argument walk is not
 value-matched — the same-session context rule still raises a hard ASK in those cases.
 
+The content classifier was reviewed against the shapes that break naive scanners: minified
+single-line JSON, header forms, CRLF, tabs, nested YAML, Python dicts, TOML, trailing comments,
+escaped quotes, connection URLs, multiple vendor formats in one file, a secret buried in a large file,
+and the truncation boundary — plus the false-positive side: i18n strings, CSS class lists, deep import
+paths, docker digests, HTML data attributes, base64 assertions, UUID lists, checksum manifests,
+lockfiles, JWT documentation examples, public keys and `.env.example` placeholders. Two real defects
+were found and fixed: the vendor-prefix and connection-URL detectors were being suppressed by the
+generic "ordinary identifier" filter (the structural position is the proof there, so only an outright
+placeholder now disqualifies them), and the keyword-proximity detector fired on paths and prose
+(`app/production/credentials`, `/etc/ssl/private/server.key`), which now require a digit or a
+non-path shape. Confirmed residuals: encoded/hex values, values split across lines, and a bare opaque
+token with no credential marker anywhere near it — the last one deliberately, because calling it a
+secret means trusting entropy alone.
+
 ## Known limitations (not guaranteed by this slice)
 
 - Sandbox off is materially weaker: allowed workspace scripts (`npm run x`, `make`, `python script.py`)
@@ -326,6 +382,12 @@ value-matched — the same-session context rule still raises a hard ASK in those
 - Interpreter inline code (`python -c`, `node -e`) is a soft ASK, not analysed.
 - Network policy without secret context is unchanged: `webfetch`, `websearch`, an ordinary `curl` are
   soft ASK / existing rules.
+- (content) The classifier reads **markers, not entropy**: a bare opaque token alone in a file, a
+  base64/hex-encoded credential, and a value split across source lines are not detected. Content is
+  classified from what a *successful* call returned or from a file an outbound action is about to
+  send; a tool that reads and transmits internally, with the bytes never crossing either boundary, is
+  out of reach. Classification is bounded (512 KB of content, 1 MB per file inspected at decision
+  time), so a secret past the cap is missed.
 - (v3 residuals) **Load-time execution is not governed at all**: `.kilocode/tool/*.ts` and project
   plugins are `import()`ed while the registry/plugin state is built — before any tool call, ask or
   sandbox — so opening a session in a hostile repository is already arbitrary code execution in the
