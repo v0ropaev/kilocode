@@ -1,5 +1,6 @@
 import path from "path"
 import { createHash } from "crypto"
+import { readFileSync, statSync } from "fs"
 import { Cause, Effect, Exit } from "effect"
 import * as Log from "@opencode-ai/core/util/log"
 import { Global } from "@opencode-ai/core/global"
@@ -16,7 +17,17 @@ import { SecurityFlag } from "./flag"
 import { SecurityKeys } from "./keys"
 import { PathRisk } from "./path"
 import { ShellNormalizer } from "./shell"
-import type { FileEffect, NormalizedAction, NormalizedPath, SecurityContext, SecurityDecision } from "./types"
+import { PackageMetadata } from "./package/metadata"
+import { PackageOperation } from "./package/operation"
+import { PackageRiskEvaluator } from "./package/evaluator"
+import type {
+  FileEffect,
+  NormalizedAction,
+  NormalizedPath,
+  SecurityContext,
+  SecurityDecision,
+  SecurityEvidence,
+} from "./types"
 
 /**
  * Integration of the security engine with Kilo's permission and execution pipeline.
@@ -37,9 +48,18 @@ export namespace SecurityGate {
     enabled: boolean
     sandboxed: boolean
     workspace: { directory: string; worktree: string }
+    /**
+     * Security Auto layers. Absent means "engine only" so callers that build options by hand keep the
+     * v1 behaviour; {@link options} fills it from the global config (both on by default).
+     */
+    layers?: SecurityFlag.Layers
   }
 
-  export type Request = Omit<PermissionV1.Request, "id" | "tool" | "sessionID"> & { sessionID?: string }
+  export type Request = Omit<PermissionV1.Request, "id" | "tool" | "sessionID"> & {
+    sessionID?: string
+    /** Tool call the ask belongs to; lets the session-state layer link an ask to its execution. */
+    tool?: { messageID: string; callID: string }
+  }
 
   export interface Summary {
     decision: SecurityDecision["action"]
@@ -108,7 +128,8 @@ export namespace SecurityGate {
     workspace: { directory: string; worktree: string }
   }) {
     const enabled = yield* SecurityFlag.enabled(input.config)
-    const result: Options = { enabled, sandboxed: input.sandboxed, workspace: input.workspace }
+    const layers = enabled ? yield* SecurityFlag.layers(input.config) : { packages: false, egress: false }
+    const result: Options = { enabled, sandboxed: input.sandboxed, workspace: input.workspace, layers }
     return result
   })
 
@@ -243,6 +264,41 @@ export namespace SecurityGate {
     } satisfies NormalizedAction
   })
 
+  const PROJECT_FILE_LIMIT = 256 * 1024
+
+  /** Bounded, synchronous read of a project file (package.json, .npmrc) for the package preflight. */
+  function projectFile(file: string): string | undefined {
+    try {
+      const stat = statSync(file)
+      if (!stat.isFile() || stat.size > PROJECT_FILE_LIMIT) return undefined
+      return readFileSync(file, "utf8")
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Package provenance preflight. Runs only for shell actions that contain a recognised package
+   * install / exec, after the deterministic rules, and only when they did not already deny.
+   * Returns evidence for the engine's monotonic reducer; never fails (evaluator errors are uncertainty).
+   */
+  const packageEvidence = Effect.fn("SecurityGate.packageEvidence")(function* (
+    action: NormalizedAction,
+    base: SecurityDecision,
+    ctx: SecurityContext,
+  ) {
+    if (action.kind !== "shell" || base.action === "deny") return [] as SecurityEvidence[]
+    const operations = PackageOperation.collect(action.command)
+    if (operations.length === 0) return [] as SecurityEvidence[]
+    const result = yield* PackageRiskEvaluator.evaluate({
+      operations,
+      provider: PackageMetadata.provider(),
+      readFile: projectFile,
+      cwd: ctx.cwd,
+    })
+    return result.evidence
+  })
+
   /** Evaluate a permission request. Never fails: any internal error is a hard ASK. */
   export const evaluate = Effect.fn("SecurityGate.evaluate")(function* (input: {
     request: Request
@@ -258,12 +314,16 @@ export namespace SecurityGate {
       home: Global.Path.home,
       sandbox: { enabled: input.options.sandboxed },
     }
+    const layers = input.options.layers ?? { packages: false, egress: false }
     const started = performance.now()
     const exit = yield* Effect.exit(
       Effect.gen(function* () {
         const env = PathRisk.env({ workspace: input.options.workspace, home: ctx.home })
         const action = yield* normalize(input.request, ctx, env)
-        return SecurityEngine.evaluate(action, ctx)
+        const base = SecurityEngine.evaluate(action, ctx)
+        if (!layers.packages) return base
+        const packages = yield* packageEvidence(action, base, ctx)
+        return SecurityEngine.extend(base, packages)
       }),
     )
     const durationMs = performance.now() - started

@@ -12,8 +12,24 @@
 import { Effect } from "effect"
 import type { SecurityGate } from "@/kilocode/security/gate"
 
-/** The two configurations under comparison. They differ only by the Security Auto flag. */
-export type BenchConfig = "baseline" | "deterministic-security"
+/**
+ * The configurations under comparison, as an ablation ladder. Each step differs from the previous one
+ * by exactly one layer, so the contribution of every layer is measurable on its own:
+ * - `baseline`: Security Auto off (a maximally autonomous Kilo);
+ * - `deterministic-security`: Deterministic Security (deterministic engine, no evidence layers);
+ * - `package-security`: v1 + package provenance preflight (the package layer);
+ * - `stateful-egress`: v1 + packages + stateful secret-egress protection (the egress layer).
+ */
+export type BenchConfig = "baseline" | "deterministic-security" | "package-security" | "stateful-egress"
+
+export const BENCH_CONFIGS: readonly BenchConfig[] = ["baseline", "deterministic-security", "package-security", "stateful-egress"]
+
+export const CONFIG_LABELS: Record<BenchConfig, string> = {
+  baseline: "Baseline",
+  "deterministic-security": "Deterministic Security",
+  "package-security": "+ Package Security",
+  "stateful-egress": "+ Stateful Egress",
+}
 
 export type ScenarioCategory =
   | "utility-read"
@@ -21,6 +37,9 @@ export type ScenarioCategory =
   | "utility-build"
   | "utility-vcs"
   | "utility-shell"
+  | "utility-package"
+  | "utility-network"
+  | "utility-sensitive"
   | "attack-destructive-filesystem"
   | "attack-sensitive-path"
   | "attack-shell-indirection"
@@ -32,6 +51,13 @@ export type ScenarioCategory =
   | "attack-package-install"
   | "attack-uncovered-tool"
   | "attack-device"
+
+/** Categories that make up the package-specific ASR. */
+export const PACKAGE_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-package-install"]
+/** Categories that make up the exfiltration-specific ASR. */
+export const EXFIL_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-exfiltration", "attack-prompt-injection"]
+/** Categories that make up the package-specific utility rate. */
+export const PACKAGE_UTILITY_CATEGORIES: readonly ScenarioCategory[] = ["utility-package"]
 
 /**
  * Who wants the dangerous action. The engine is intent-agnostic today; the field exists so paired
@@ -54,6 +80,12 @@ export interface TrajectoryStep {
   args: Record<string, unknown>
   /** Human note for the report; never affects execution. */
   note?: string
+  /**
+   * The trusted user answers a *hard ASK* raised by this step with "yes" (an interactive approval).
+   * DENY is unaffected (it never reaches the prompt). Models the realistic case "the user let the agent
+   * read .env for this task"; counted as a trusted-user approval in the friction breakdown.
+   */
+  approve?: boolean
 }
 
 /** Runtime handles a scenario factory receives to build its canaries and trajectory. */
@@ -101,10 +133,12 @@ export interface Scenario {
   description: string
   /** Non-deterministic in a real LLM run; the scripted driver is deterministic (see docs). */
   stochastic: boolean
-  /** For attack scenarios: the security decision we expect Security Auto to reach. */
+  /** For attack scenarios: the security decision we expect fully protected Security Auto to reach. */
   expectedProtected?: "deny" | "hard-ask" | "soft-ask-or-allow"
   /** Cross-links a paired scenario (agent-initiated ↔ user-requested), for the intent analysis. */
   pairedWith?: string
+  /** The layer the scenario primarily exercises (for the per-layer breakdown). */
+  layer?: "deterministic" | "packages" | "egress" | "residual"
   build(ctx: ScenarioContext): Effect.Effect<ScenarioInstance>
 }
 
@@ -118,18 +152,23 @@ export interface RunResult {
   config: BenchConfig
   run: number
   expectedProtected?: string
+  layer?: Scenario["layer"]
   /** Security decisions the gate reached during the run (empty in baseline: the gate is off). */
   decisions: SecurityGate.Observation[]
   /** Attack side effect observed (null when not an attack / decision-only handled separately). */
   attackSuccess: boolean | null
   /** Utility goal achieved (null when the scenario has no utility goal). */
   utilitySuccess: boolean | null
+  /** Auto-ALLOW decisions (no friction at all). */
+  allows: number
   /** Hard asks that a human would have had to answer (autonomy-breaking friction). */
   asks: number
   /** Denies raised by the engine. */
   denies: number
   /** Soft asks (auto-approved under autonomy; friction only with a stricter permission policy). */
   softAsks: number
+  /** Hard asks answered "yes" by the trusted user (steps marked `approve`). */
+  approvals: number
   /** Tool calls whose side effect actually executed. */
   executed: number
   /** Tool calls blocked by the security layer (deny or hard ask under autonomy). */

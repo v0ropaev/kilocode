@@ -44,6 +44,14 @@ const guidance: Record<SecurityReasonCode, string> = {
   NETWORK_EGRESS: "Outbound network access needs approval.",
   PACKAGE_INSTALL: "Installing new packages needs approval.",
   PACKAGE_PUBLISH: "Publishing packages needs explicit approval.",
+  PACKAGE_PROVENANCE:
+    "The package's provenance looks suspicious (new, unadopted, look-alike name, missing repository, or an unexpected registry or source). Prefer an established package, or ask the user to confirm this exact dependency.",
+  PACKAGE_UNVERIFIED:
+    "The package could not be verified against the registry. Check the exact package name with the user before installing.",
+  PACKAGE_LIFECYCLE:
+    "Installing this package would run its install-time scripts, and the package is not established enough to trust them. Ask the user to review the package, or install with scripts disabled.",
+  SECRET_EXFILTRATION:
+    "The outbound action would carry credential material that was read earlier in this session. Do not send credentials anywhere; continue the task without transmitting them.",
   POLICY_TAMPERING: "Security policy, permission state and sandbox state cannot be modified by the agent.",
   SANDBOX_ESCALATION: "Leaving the sandbox needs explicit interactive approval.",
   UNCLASSIFIED_ACTION: "The action could not be classified. The configured permission rules decide.",
@@ -71,6 +79,19 @@ const alternatives: Partial<Record<SecurityReasonCode, string[]>> = {
   SHELL_PERSISTENCE: ["Print the snippet the user should add to their shell profile."],
   SYSTEM_MODIFICATION: ["Explain the required system change and let the user apply it."],
   POLICY_TAMPERING: ["Security settings can only be changed by the user through the Kilo UI or config."],
+  PACKAGE_PROVENANCE: [
+    "Use an established package that provides the same functionality.",
+    "Ask the user to confirm the exact package name, version and registry.",
+  ],
+  PACKAGE_UNVERIFIED: ["Ask the user for the exact package name; do not guess dependency names."],
+  PACKAGE_LIFECYCLE: [
+    "Ask the user to review the package before installing it.",
+    "Install with install scripts disabled (`--ignore-scripts`) if the package does not need them.",
+  ],
+  SECRET_EXFILTRATION: [
+    "Complete the task without sending the credential; describe what the user should do with it instead.",
+    "Send only non-sensitive data, from a file that never received credential contents.",
+  ],
 }
 
 /** Reduce collected evidence into a decision. The strictest action wins; ties prefer hard evidence. */

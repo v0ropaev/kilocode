@@ -40,22 +40,28 @@ import { Truncate } from "@/tool/truncate"
 import { Schema } from "effect"
 import { SecurityGate } from "@/kilocode/security/gate"
 import { SecurityKeys } from "@/kilocode/security/keys"
+import { PackageMetadata } from "@/kilocode/security/package/metadata"
 import { BenchIsolation } from "./isolation"
 import { BenchCollector } from "./collector"
-import type { BenchConfig, RunResult, Scenario, ScenarioContext } from "./types"
+import { BenchPackages } from "./packages"
+import { BENCH_CONFIGS, type BenchConfig, type RunResult, type Scenario, type ScenarioContext } from "./types"
 
 /**
  * The benchmark runner. It drives real Kilo tool executions through the real permission +
  * Security Auto pipeline (SessionTools.resolve → ctx.ask → KiloSessionPrompt.askPermission →
  * SecurityGate → real tools), exactly the path a live agent uses. The ONLY difference between the
- * baseline and protected configurations is the `security_auto` flag returned by the config layer —
- * so any measured difference is attributable to Security Auto and nothing else.
+ * configurations is what the config layer returns for the `security_auto*` flags — so any measured
+ * difference is attributable to the security layer under test and nothing else.
  *
  * The agent trajectory is scripted (a fixed list of tool calls). The security layer is deterministic
  * by design ("no decision depends on the model recognising an attack"), so a scripted trajectory
  * measures the policy's containment precisely, without the confound of whether a model would attempt
  * the action. Stochastic, model-driven runs are a separate driver (see docs); the harness aggregates
  * `runsPerCase` runs regardless of driver.
+ *
+ * Friction is instrumented per decision kind (auto ALLOW / soft ASK / hard ASK / DENY) plus the
+ * trusted-user approvals a scenario explicitly grants (`step.approve`), so "ASK/task = 0" is never
+ * mistaken for "no approval fatigue": the report shows what a human would have been asked.
  */
 export namespace BenchHarness {
   function model(): Provider.Model {
@@ -163,12 +169,26 @@ export namespace BenchHarness {
     }),
   )
 
-  function configLayer(enabled: boolean) {
+  /** The single knob: what the global config says for each configuration of the ablation ladder. */
+  export function flagsFor(config: BenchConfig) {
+    switch (config) {
+      case "baseline":
+        return {}
+      case "deterministic-security":
+        return { experimental: { security_auto: true, security_auto_packages: false, security_auto_egress: false } }
+      case "package-security":
+        return { experimental: { security_auto: true, security_auto_packages: true, security_auto_egress: false } }
+      case "stateful-egress":
+        return { experimental: { security_auto: true, security_auto_packages: true, security_auto_egress: true } }
+    }
+  }
+
+  function configLayer(config: BenchConfig) {
     return Layer.succeed(
       Config.Service,
       Config.Service.of({
         get: () => Effect.succeed({}),
-        getGlobal: () => Effect.succeed(enabled ? { experimental: { security_auto: true } } : {}),
+        getGlobal: () => Effect.succeed(flagsFor(config)),
         getConsoleState: () => Effect.succeed(emptyConsoleState),
         update: () => Effect.void,
         updateGlobal: (config) => Effect.succeed({ info: config, changed: false }),
@@ -181,10 +201,17 @@ export namespace BenchHarness {
   }
 
   /**
+   * The trusted user's interactive answers for the step currently executing. Mutated by runOne per
+   * step; read by the permission mock. Sequential execution (concurrency 1) keeps this race-free.
+   */
+  const human = { approve: false, approvals: 0 }
+
+  /**
    * Autonomous permission model. This is the "no human present" client every configuration shares:
    * - a DENY never reaches here (the gate raises SecurityDeniedError first → structured block);
    * - a hard ASK (securityAsk metadata) cannot be auto-approved, mirroring `kilo run --auto`, so we
-   *   reject it → the action does not execute (counted as friction, never as a silent allow);
+   *   reject it → the action does not execute (counted as friction, never as a silent allow) — unless
+   *   the scenario step is marked `approve`, which models the trusted user answering the prompt;
    * - everything else (soft ask, allow) is approved once, matching maximum autonomy.
    */
   function permissionLayer() {
@@ -192,6 +219,10 @@ export namespace BenchHarness {
       ask: (input) =>
         Effect.gen(function* () {
           if (input.metadata?.[SecurityKeys.ASK] === true) {
+            if (human.approve) {
+              human.approvals += 1
+              return { manual: true } as const
+            }
             return yield* Effect.fail(new PermissionV1.RejectedError())
           }
           return { manual: false } as const
@@ -199,7 +230,7 @@ export namespace BenchHarness {
     })
   }
 
-  function baseLayers(enabled: boolean) {
+  function baseLayers(config: BenchConfig) {
     const agents = Layer.mock(Agent.Service)({ get: () => Effect.succeed(AGENT) })
     const sessions = Layer.mock(Session.Service)({
       get: () => Effect.succeed(sessionInfo(SessionID.make("ses_security-bench"), os.tmpdir())),
@@ -213,7 +244,7 @@ export namespace BenchHarness {
       limits: () => Effect.succeed({ maxLines: Truncate.MAX_LINES, maxBytes: Truncate.MAX_BYTES }),
     })
     return Layer.mergeAll(
-      configLayer(enabled),
+      configLayer(config),
       agents,
       sessions,
       permissionLayer(),
@@ -231,7 +262,7 @@ export namespace BenchHarness {
     )
   }
 
-  function registryLayer(enabled: boolean) {
+  function registryLayer(config: BenchConfig) {
     return Layer.effect(
       ToolRegistry.Service,
       Effect.gen(function* () {
@@ -247,7 +278,7 @@ export namespace BenchHarness {
           tools: () => Effect.succeed(list),
         })
       }),
-    ).pipe(Layer.provideMerge(baseLayers(enabled)))
+    ).pipe(Layer.provideMerge(baseLayers(config)))
   }
 
   function resolveTools(sessionID: SessionID, ctx: InstanceContext) {
@@ -327,6 +358,33 @@ export namespace BenchHarness {
     collector: BenchCollector.Handle
   }
 
+  function empty(input: RunOneInput): RunResult {
+    const { scenario, config, run } = input
+    return {
+      scenarioId: scenario.id,
+      category: scenario.category,
+      kind: scenario.kind,
+      intent: scenario.intent,
+      oracle: scenario.oracle,
+      config,
+      run,
+      expectedProtected: scenario.expectedProtected,
+      layer: scenario.layer,
+      decisions: [],
+      attackSuccess: scenario.kind === "attack" ? false : null,
+      utilitySuccess: null,
+      allows: 0,
+      asks: 0,
+      denies: 0,
+      softAsks: 0,
+      approvals: 0,
+      executed: 0,
+      blocked: 0,
+      durationMs: 0,
+      securityLatencies: [],
+    }
+  }
+
   /**
    * Execute one (scenario, config, run) and produce a machine-readable {@link RunResult}. Requires the
    * tool/security services in context; {@link runSuite} provides them once per config so the heavy
@@ -335,11 +393,13 @@ export namespace BenchHarness {
   export function runOne(input: RunOneInput) {
     const { scenario, config, run, sandbox, collector } = input
     return Effect.gen(function* () {
-      // Fairness guard: SecurityFlag.enabled consults KILO_SECURITY_AUTO *before* the config flag, so a
-      // stray env var would force both configs identical (baseline denying too). Clear it every run so
-      // the ONLY thing that toggles the engine is the config layer this harness controls.
+      // Fairness guard: SecurityFlag.enabled consults KILO_SECURITY_AUTO* *before* the config flags, so a
+      // stray env var would force configurations identical. Clear them every run so the ONLY thing that
+      // toggles the engine and its layers is the config layer this harness controls.
       yield* Effect.sync(() => {
         delete process.env.KILO_SECURITY_AUTO
+        delete process.env.KILO_SECURITY_AUTO_PACKAGES
+        delete process.env.KILO_SECURITY_AUTO_EGRESS
       })
       // Safety: put the sandbox bin shim first on PATH at the execution point itself (not only in
       // runAll), so `npm install …` resolves to the inert fake shim from ANY entry point — runOne,
@@ -368,31 +428,11 @@ export namespace BenchHarness {
         path: (...segments) => sandbox.resolve(...segments),
       }
 
-      const base: RunResult = {
-        scenarioId: scenario.id,
-        category: scenario.category,
-        kind: scenario.kind,
-        intent: scenario.intent,
-        oracle: scenario.oracle,
-        config,
-        run,
-        expectedProtected: scenario.expectedProtected,
-        decisions: [],
-        attackSuccess: scenario.kind === "attack" ? false : null,
-        utilitySuccess: null,
-        asks: 0,
-        denies: 0,
-        softAsks: 0,
-        executed: 0,
-        blocked: 0,
-        durationMs: 0,
-        securityLatencies: [],
-      }
+      const base = empty(input)
 
-      const built = yield* scenario.build(scenarioCtx).pipe(
-        Effect.exit,
-        Effect.provideService(InstanceRef, instanceContext(workspace)),
-      )
+      const built = yield* scenario
+        .build(scenarioCtx)
+        .pipe(Effect.exit, Effect.provideService(InstanceRef, instanceContext(workspace)))
       if (Exit.isFailure(built)) return { ...base, error: `build failed: ${String(Cause.squash(built.cause))}` }
       const scenarioInstance = built.value
 
@@ -407,9 +447,14 @@ export namespace BenchHarness {
 
       collector.reset()
       const observations: SecurityGate.Observation[] = []
-      const dispose = SecurityGate.observe((observation) => observations.push(observation))
+      const disposeObserver = SecurityGate.observe((observation) => observations.push(observation))
+      // Registry metadata comes from deterministic fixtures in every configuration; the live registry
+      // is never consulted by the benchmark.
+      const disposeProvider = PackageMetadata.use(BenchPackages.provider())
       const ctx = instanceContext(workspace)
       const sessionID = SessionID.make(`ses_bench_${scenario.id}_${config}_${run}`.replace(/[^A-Za-z0-9_]/g, "_"))
+      human.approve = false
+      human.approvals = 0
 
       const started = performance.now()
       const outcome = yield* Effect.gen(function* () {
@@ -423,6 +468,13 @@ export namespace BenchHarness {
             // success. Decision-only cases are summarised by the engine's decision, never in the ASR.
             return { executed: 0, blocked: 0, attackSuccess: null, utilitySuccess: null }
           }
+          const flags = flagsFor(config).experimental!
+          const options: SecurityGate.Options = {
+            enabled: true,
+            sandboxed: false,
+            workspace: { directory: workspace, worktree: workspace },
+            layers: { packages: flags.security_auto_packages, egress: flags.security_auto_egress },
+          }
           let anyRan = false
           let stoppedSteps = 0
           for (const step of scenarioInstance.steps) {
@@ -431,11 +483,11 @@ export namespace BenchHarness {
             const cwd = typeof step.args.workdir === "string" ? step.args.workdir : workspace
             const decision = yield* SecurityGate.evaluate({
               request: { permission: "bash", patterns: [command], always: [], metadata: { command, cwd } },
-              options: { enabled: true, sandboxed: false, workspace: { directory: workspace, worktree: workspace } },
+              options,
               sessionID,
               agent: AGENT.name,
             })
-            const stopped = decision.action === "deny" || (decision.action === "ask" && decision.hard)
+            const stopped = decision.action === "deny" || (decision.action === "ask" && decision.hard && !step.approve)
             if (stopped) stoppedSteps += 1
             else anyRan = true
           }
@@ -448,7 +500,9 @@ export namespace BenchHarness {
         let executed = 0
         let blocked = 0
         for (const [index, step] of scenarioInstance.steps.entries()) {
+          human.approve = step.approve === true
           const stepOutcome = yield* runStep(tools, step.tool, step.args, `call_${index}`)
+          human.approve = false
           if (stepOutcome.error) return yield* Effect.fail(new Error(stepOutcome.error))
           if (stepOutcome.executed) executed += 1
           if (stepOutcome.blocked) blocked += 1
@@ -461,9 +515,7 @@ export namespace BenchHarness {
             : null
         const utilityOracle = scenarioInstance.utilityCompleted ? yield* scenarioInstance.utilityCompleted : undefined
         const utilitySuccess =
-          scenario.kind === "utility"
-            ? (utilityOracle ?? true) && blocked === 0
-            : (utilityOracle ?? null)
+          scenario.kind === "utility" ? (utilityOracle ?? true) && blocked === 0 : (utilityOracle ?? null)
         return { executed, blocked, attackSuccess, utilitySuccess }
       }).pipe(
         Effect.provideService(InstanceRef, ctx),
@@ -477,65 +529,42 @@ export namespace BenchHarness {
         Effect.exit,
       )
 
-      dispose()
+      disposeObserver()
+      disposeProvider()
+      human.approve = false
       const durationMs = performance.now() - started
 
+      const allows = observations.filter((observation) => observation.decision === "allow").length
       const denies = observations.filter((observation) => observation.decision === "deny").length
       const asks = observations.filter((observation) => observation.decision === "ask" && observation.hard).length
       const softAsks = observations.filter((observation) => observation.decision === "ask" && !observation.hard).length
+      const counted = {
+        decisions: observations,
+        allows,
+        denies,
+        asks,
+        softAsks,
+        approvals: human.approvals,
+        securityLatencies: observations.map((observation) => observation.durationMs),
+        durationMs,
+      }
 
       if (Exit.isFailure(outcome)) {
         const failure = Cause.squash(outcome.cause)
-        return {
-          ...base,
-          decisions: observations,
-          denies,
-          asks,
-          softAsks,
-          securityLatencies: observations.map((observation) => observation.durationMs),
-          durationMs,
-          error: failure instanceof Error ? failure.message : String(failure),
-        }
+        return { ...base, ...counted, error: failure instanceof Error ? failure.message : String(failure) }
       }
 
       return {
         ...base,
-        decisions: observations,
+        ...counted,
         attackSuccess: outcome.value.attackSuccess,
         utilitySuccess: outcome.value.utilitySuccess,
-        denies,
-        asks,
-        softAsks,
         executed: outcome.value.executed,
         blocked: outcome.value.blocked,
-        securityLatencies: observations.map((observation) => observation.durationMs),
-        durationMs,
       }
     }).pipe(
       // A failure in one run must never void the whole report.
-      Effect.catchCause((cause) =>
-        Effect.succeed({
-          scenarioId: scenario.id,
-          category: scenario.category,
-          kind: scenario.kind,
-          intent: scenario.intent,
-          oracle: scenario.oracle,
-          config,
-          run,
-          expectedProtected: scenario.expectedProtected,
-          decisions: [],
-          attackSuccess: scenario.kind === "attack" ? false : null,
-          utilitySuccess: null,
-          asks: 0,
-          denies: 0,
-          softAsks: 0,
-          executed: 0,
-          blocked: 0,
-          durationMs: 0,
-          securityLatencies: [],
-          error: `run crashed: ${String(cause)}`,
-        } satisfies RunResult),
-      ),
+      Effect.catchCause((cause) => Effect.succeed({ ...empty(input), error: `run crashed: ${String(cause)}` })),
     )
   }
 
@@ -561,19 +590,17 @@ export namespace BenchHarness {
       }
     }
     // Sequential: fair latency, and no races on the shared collector / PATH / decision observer.
-    return Effect.forEach(jobs, runOne, { concurrency: 1 }).pipe(
-      Effect.provide(registryLayer(input.config === "deterministic-security")),
-    )
+    return Effect.forEach(jobs, runOne, { concurrency: 1 }).pipe(Effect.provide(registryLayer(input.config)))
   }
 
-  /** Run both configurations. Baseline first, then protected, on the same sandbox. */
-  export function runAll(input: SuiteInput): Effect.Effect<RunResult[]> {
+  /** Run the configurations in ladder order (default: all four) on the same sandbox. */
+  export function runAll(input: SuiteInput & { configs?: readonly BenchConfig[] }): Effect.Effect<RunResult[]> {
     return Effect.gen(function* () {
-      // The PATH shim and KILO_SECURITY_AUTO scrub now live in runOne, so every entry point
-      // (runAll / runSuite / runOne) is safe on its own.
-      const baseline = yield* runSuite({ ...input, config: "baseline" })
-      const guarded = yield* runSuite({ ...input, config: "deterministic-security" })
-      return [...baseline, ...guarded]
+      const out: RunResult[] = []
+      for (const config of input.configs ?? BENCH_CONFIGS) {
+        out.push(...(yield* runSuite({ ...input, config })))
+      }
+      return out
     })
   }
 }

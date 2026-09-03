@@ -10,6 +10,10 @@
 // like test/preload.ts. Destructive scenarios execute for real, but only inside the sandbox.
 //
 // Usage: bun run script/security-bench.ts [--runs N] [--scenario <id>] [--out <dir>]
+//        [--configs baseline,deterministic-security,package-security] [--tag <label>]
+//
+// The configurations form an ablation ladder (each adds one layer to the previous one); `--configs`
+// selects a subset, e.g. the first three rungs of the ladder.
 
 import os from "node:os"
 import path from "node:path"
@@ -23,6 +27,8 @@ function arg(name: string, fallback?: string): string | undefined {
 
 const runsPerCase = Math.max(1, Number(arg("runs", "3")) || 3)
 const scenarioFilter = arg("scenario")
+const configsArg = arg("configs")
+const tag = arg("tag")
 
 // ---------------------------------------------------------------------------
 // Isolation env — must run before importing anything from src/.
@@ -85,26 +91,39 @@ const sandbox = await BenchIsolation.create({
 })
 const collector = await BenchCollector.start()
 
-const scenarios = BenchScenarios.all().filter((scenario) => !scenarioFilter || scenario.id === scenarioFilter)
+const { BENCH_CONFIGS } = await import("@/kilocode/security/bench/types")
+
+// `--scenario atk-package-*` selects by prefix; an exact id selects one scenario.
+const scenarios = BenchScenarios.all().filter((scenario) => {
+  if (!scenarioFilter) return true
+  if (scenarioFilter.endsWith("*")) return scenario.id.startsWith(scenarioFilter.slice(0, -1))
+  return scenario.id === scenarioFilter
+})
 if (scenarios.length === 0) throw new Error(`no scenarios matched --scenario ${scenarioFilter}`)
+const configs = (configsArg ? configsArg.split(",") : [...BENCH_CONFIGS]).map((name) => {
+  const found = BENCH_CONFIGS.find((config) => config === name.trim())
+  if (!found) throw new Error(`unknown config ${name}; expected one of ${BENCH_CONFIGS.join(", ")}`)
+  return found
+})
 
 // eslint-disable-next-line no-console
 console.error(
-  `running ${scenarios.length} scenarios × ${runsPerCase} runs × 2 configs = ${scenarios.length * runsPerCase * 2} runs`,
+  `running ${scenarios.length} scenarios × ${runsPerCase} runs × ${configs.length} configs = ${scenarios.length * runsPerCase * configs.length} runs`,
 )
 
-const results = await Effect.runPromise(BenchHarness.runAll({ scenarios, runsPerCase, sandbox, collector }))
+const results = await Effect.runPromise(BenchHarness.runAll({ scenarios, runsPerCase, sandbox, collector, configs }))
 
 const report = BenchMetrics.aggregate({
   results,
   runsPerCase,
   scenarioCount: scenarios.length,
   generatedAt: new Date().toISOString(),
+  configs,
 })
 const markdown = BenchReport.toMarkdown(report)
 const jsonl = BenchReport.toJsonl(results)
 
-const outDir = arg("out", path.join(import.meta.dir, "..", ".artifacts", "security-bench"))!
+const outDir = arg("out", path.join(import.meta.dir, "..", ".artifacts", "security-bench", tag ?? "latest"))!
 await fs.mkdir(outDir, { recursive: true })
 await fs.writeFile(path.join(outDir, "results.jsonl"), jsonl + "\n")
 await fs.writeFile(path.join(outDir, "summary.json"), JSON.stringify(report, null, 2) + "\n")

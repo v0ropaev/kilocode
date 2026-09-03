@@ -1,11 +1,12 @@
 import { BenchMetrics } from "./metrics"
-import type { RunResult } from "./types"
+import { CONFIG_LABELS, type RunResult } from "./types"
 
 /**
  * Serialisation of benchmark output. Two shapes:
  * - machine-readable JSONL, one {@link RunResult} per line, in a stable order;
- * - a human-readable Markdown summary with the headline table and per-category breakdown.
- * Neither contains secrets, file contents, or raw command text (only reason codes and rule ids).
+ * - a human-readable Markdown summary: the ablation table, the friction breakdown, per-category and
+ *   per-scenario tables. Neither contains secrets, file contents, or raw command text (only reason
+ *   codes and rule ids).
  *
  * Ordering and every decision/outcome field are deterministic across reruns; the timing fields
  * (`durationMs`, `securityLatencies`) are wall-clock and vary, so two captures are not byte-identical —
@@ -40,49 +41,78 @@ export namespace BenchReport {
     return value === undefined ? "n/a" : `${value.toFixed(2)} ms`
   }
 
+  function label(config: BenchMetrics.ConfigMetrics) {
+    return CONFIG_LABELS[config.config]
+  }
+
   export function toMarkdown(report: BenchMetrics.Report): string {
     const lines: string[] = []
-    lines.push("# Security Auto Mode — Benchmark v1 results")
+    lines.push("# Security Auto Mode — benchmark results")
     lines.push("")
     lines.push(`Generated: ${report.generatedAt}`)
     lines.push("")
     lines.push(`Scenarios: ${report.scenarioCount} · runs per case: ${report.runsPerCase}`)
     lines.push("")
 
-    lines.push("| Configuration | ASR | Utility | Safe DENY FP | Safe ASK FP | ASK/task | Security p95 |")
-    lines.push("| --- | --: | --: | --: | --: | --: | --: |")
+    lines.push("## Ablation (each row adds one layer to the previous)")
+    lines.push("")
+    lines.push(
+      "| Configuration | Overall ASR | Package ASR | Exfil ASR | Utility | Package utility | ASK/task | Security p95 |",
+    )
+    lines.push("| --- | --: | --: | --: | --: | --: | --: | --: |")
     for (const config of report.configs) {
       lines.push(
-        `| ${config.config} | ${pct(config.asr)} | ${pct(config.utility)} | ${config.safeDenyFalsePositives} | ` +
-          `${config.safeAskFalsePositives} | ${num(config.asksPerTask)} | ${ms(config.securityLatencyP95)} |`,
+        `| ${label(config)} | ${pct(config.asr)} | ${pct(config.packageAsr)} | ${pct(config.exfilAsr)} | ` +
+          `${pct(config.utility)} | ${pct(config.packageUtility)} | ${num(config.asksPerTask)} | ${ms(config.securityLatencyP95)} |`,
       )
     }
     lines.push("")
 
-    lines.push("## Autonomy / friction / latency")
+    lines.push("## Friction / false positives / latency")
     lines.push("")
-    lines.push("| Configuration | Safe completion | DENY/task | Security p50 | Task latency (mean) | Errored runs |")
-    lines.push("| --- | --: | --: | --: | --: | --: |")
+    lines.push(
+      "| Configuration | auto ALLOW | soft ASK | hard ASK | DENY | trusted-user approvals | Safe DENY FP | Safe ASK FP | Safe completion | DENY/task | Security p50 | Task latency (mean) | Errored runs |",
+    )
+    lines.push("| --- | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: |")
     for (const config of report.configs) {
+      const f = config.friction
       lines.push(
-        `| ${config.config} | ${pct(config.safeCompletion)} | ${num(config.deniesPerTask)} | ` +
-          `${ms(config.securityLatencyP50)} | ${ms(config.taskLatencyMean)} | ${config.errored} |`,
+        `| ${label(config)} | ${f.allows} | ${f.softAsks} | ${f.hardAsks} | ${f.denies} | ${f.approvals} | ` +
+          `${config.safeDenyFalsePositives} | ${config.safeAskFalsePositives} | ${pct(config.safeCompletion)} | ` +
+          `${num(config.deniesPerTask)} | ${ms(config.securityLatencyP50)} | ${ms(config.taskLatencyMean)} | ${config.errored} |`,
       )
     }
     lines.push("")
 
-    lines.push("## Attack Success Rate by category (side-effect oracle)")
+    lines.push("## By category (attack: ASR · utility: completion rate)")
     lines.push("")
-    lines.push("| Attack category | Baseline ASR | Security Auto ASR |")
-    lines.push("| --- | --: | --: |")
-    const baseline = report.configs.find((config) => config.config === "baseline")
-    const protectedConfig = report.configs.find((config) => config.config === "deterministic-security")
+    lines.push(`| Category | ${report.configs.map(label).join(" | ")} |`)
+    lines.push(`| --- | ${report.configs.map(() => "--:").join(" | ")} |`)
     const categories = new Set<string>()
     for (const config of report.configs) for (const entry of config.byCategory) categories.add(entry.category)
     for (const category of [...categories].sort()) {
-      const base = baseline?.byCategory.find((entry) => entry.category === category)
-      const prot = protectedConfig?.byCategory.find((entry) => entry.category === category)
-      lines.push(`| ${category} | ${base ? pct(base.asr) : "n/a"} | ${prot ? pct(prot.asr) : "n/a"} |`)
+      const cells = report.configs.map((config) => {
+        const entry = config.byCategory.find((item) => item.category === category)
+        return entry ? pct(entry.rate) : "n/a"
+      })
+      lines.push(`| ${category} | ${cells.join(" | ")} |`)
+    }
+    lines.push("")
+
+    lines.push("## By scenario (attack: ASR · utility: completion; hard asks / denies / approvals summed over runs)")
+    lines.push("")
+    lines.push(`| Scenario | Kind | Intent | Layer | ${report.configs.map(label).join(" | ")} |`)
+    lines.push(`| --- | --- | --- | --- | ${report.configs.map(() => "--:").join(" | ")} |`)
+    const scenarios = new Map<string, BenchMetrics.ScenarioMetrics>()
+    for (const config of report.configs) for (const entry of config.byScenario) scenarios.set(entry.scenarioId, entry)
+    for (const [scenarioId, meta] of [...scenarios.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+      const cells = report.configs.map((config) => {
+        const entry = config.byScenario.find((item) => item.scenarioId === scenarioId)
+        if (!entry) return "n/a"
+        const detail = `${entry.hardAsks}/${entry.denies}/${entry.approvals}`
+        return `${pct(entry.rate)} · ${detail}`
+      })
+      lines.push(`| ${scenarioId} | ${meta.kind} | ${meta.intent} | ${meta.layer ?? ""} | ${cells.join(" | ")} |`)
     }
     lines.push("")
 
@@ -92,7 +122,7 @@ export namespace BenchReport {
     lines.push("| --- | --: |")
     for (const config of report.configs) {
       const summary = config.decisionOnlyAttacks
-      lines.push(`| ${config.config} | ${summary.total === 0 ? "n/a" : `${summary.blocked}/${summary.total}`} |`)
+      lines.push(`| ${label(config)} | ${summary.total === 0 ? "n/a" : `${summary.blocked}/${summary.total}`} |`)
     }
     lines.push("")
 

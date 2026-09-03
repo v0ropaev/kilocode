@@ -21,6 +21,8 @@ export namespace CommandSemantics {
     chdir?: string
     /** Environment assignments that alter what a later command executes (LD_PRELOAD, BASH_ENV, ...). */
     hijack: boolean
+    /** Static `NAME=value` assignments seen while unwrapping (`env X=1 cmd`, `X=1 cmd`), dequoted. */
+    assignments: Record<string, string>
   }
 
   export interface Spec {
@@ -654,10 +656,31 @@ export namespace CommandSemantics {
   > = {
     npm: {
       system: false,
-      install: new Set(["install", "i", "add", "in", "ins", "isntall", "isntal", "up", "update", "upgrade"]),
+      // `ci` / `install-ci-test` / `install-test` install from the manifest and run every dependency's
+      // install-time scripts, exactly like a bare `npm install`; they are installs, not project scripts.
+      install: new Set([
+        "install",
+        "i",
+        "add",
+        "in",
+        "ins",
+        "isntall",
+        "isntal",
+        "up",
+        "update",
+        "upgrade",
+        "ci",
+        "clean-install",
+        "install-clean",
+        "isntall-clean",
+        "install-ci-test",
+        "cit",
+        "install-test",
+        "it",
+      ]),
       publish: new Set(["publish", "login", "adduser", "token", "deprecate", "unpublish", "owner"]),
       fetch: new Set(["exec", "x"]),
-      run: new Set(["run", "run-script", "test", "start", "build", "ci", "rebuild"]),
+      run: new Set(["run", "run-script", "test", "start", "build", "rebuild"]),
     },
     pnpm: {
       system: false,
@@ -1082,7 +1105,7 @@ export namespace CommandSemantics {
 
   /** Strip wrappers (sudo, env, xargs, nohup ...) and report what they imply. */
   export function unwrap(tokens: string[], kind: Kind): Unwrapped {
-    const out: Unwrapped = { argv: [], privileged: false, stdinTargets: false, hijack: false }
+    const out: Unwrapped = { argv: [], privileged: false, stdinTargets: false, hijack: false, assignments: {} }
     const list = [...tokens]
     while (list.length > 0) {
       const head = list[0]
@@ -1090,6 +1113,8 @@ export namespace CommandSemantics {
       const lowered = kind === "bash" ? head : head.toLowerCase()
       if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(head)) {
         if (HIJACK_ENV.test(head)) out.hijack = true
+        const eq = head.indexOf("=")
+        out.assignments[head.slice(0, eq)] = dequote(head.slice(eq + 1))
         list.shift()
         continue
       }

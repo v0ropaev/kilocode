@@ -320,6 +320,14 @@ export const Info = Schema.Struct({
         description:
           "Security Auto Mode: adjudicate side-effecting tool calls with a deterministic security policy (ALLOW / ASK / DENY) before the permission prompt. Honoured from the global config only.",
       }),
+      security_auto_packages: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Security Auto Mode layer: evaluate package installs (npm/pnpm/yarn/bun, npx) against registry provenance and install-time scripts before they run. On by default when security_auto is on; set false to disable. Global config only.",
+      }),
+      security_auto_egress: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Security Auto Mode layer: track credential reads per session and block outbound actions that would carry that material. On by default when security_auto is on; set false to disable. Global config only.",
+      }),
       // kilocode_change end
       primary_tools: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
         description: "Tools that should only be available to primary agents.",

@@ -457,18 +457,27 @@ export namespace ShellNormalizer {
       for (const node of nodes) {
         const parts = tokens(node, ps)
         const words = parts.map((item) => item.text)
+        // `NAME=value cmd` prefixes: the grammar attaches them to the command node (they are skipped by
+        // tokens()). Keep the static ones so package-provenance rules can see registry overrides.
+        const prefixed: Record<string, string> = {}
         const hijack = (() => {
+          let found = false
           for (let i = 0; i < node.childCount; i++) {
             const child = node.child(i)
+            if (child?.type !== "variable_assignment") continue
+            const eq = child.text.indexOf("=")
+            if (eq > 0) {
+              const value = child.text.slice(eq + 1)
+              prefixed[child.text.slice(0, eq)] = ShellAst.dynamic(value, ps) ? "" : CommandSemantics.dequote(value)
+            }
             if (
-              child?.type === "variable_assignment" &&
               /^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|BASH_ENV|ENV|PROMPT_COMMAND|GIT_SSH_COMMAND|GIT_SSH|GIT_EXTERNAL_DIFF|GIT_PAGER|PAGER|EDITOR|VISUAL|PERL5OPT|PYTHONSTARTUP|NODE_OPTIONS|RUBYOPT|IFS|PATH|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_DIR|GIT_WORK_TREE)=/.test(
                 child.text,
               )
             )
-              return true
+              found = true
           }
-          return false
+          return found
         })()
         const cwd = scopeCwd(node)
         positions.push({ start: node.startIndex, scope: scopeKey(node), cwd })
@@ -600,6 +609,7 @@ export namespace ShellNormalizer {
           ps && piped && spec.operands.length === 0 && (spec.effect !== undefined || spec.family === "process-control")
         if (bound && spec.effect === "read") operands.push({ path: PathRisk.unknown("<pipeline>"), effect: "read" })
         const dynamic = operands.some((item) => item.path.relation === "unknown")
+        const assignments = { ...prefixed, ...unwrapped.assignments }
         const payload =
           spec.payload && !ShellAst.dynamic(spec.payload.text, spec.payload.kind === "powershell")
             ? spec.payload
@@ -660,13 +670,23 @@ export namespace ShellNormalizer {
           escape:
             spec.escape ?? (ps && node.text.includes("--%") ? "--%" : unwrapped.hijack || hijack ? "env" : undefined),
           metadata: spec.metadata && !bound,
+          ...(Object.keys(assignments).length > 0 ? { assignments } : {}),
         })
       }
 
       const redirects: NormalizedRedirect[] = []
+      // `positions` and `commands` are parallel (every command node pushes exactly one of each), so the
+      // last position at or before a redirect in the same scope names the process it belongs to.
+      const commandAt = (index: number, scope: number): number | undefined => {
+        for (let i = positions.length - 1; i >= 0; i--) {
+          const item = positions[i]!
+          if (item.start <= index && item.scope === scope) return i
+        }
+        return undefined
+      }
       const cwdAt = (index: number, scope: number) => {
-        const match = positions.filter((item) => item.start <= index && item.scope === scope).at(-1)
-        if (match) return match.cwd
+        const at = commandAt(index, scope)
+        if (at !== undefined) return positions[at]!.cwd
         return poisoned ? undefined : initial
       }
       walk(root, (node) => {
@@ -677,13 +697,15 @@ export namespace ShellNormalizer {
           if ((operator === ">&" || operator === "<&") && target.type === "number") return
           const effect: NormalizedRedirect["effect"] = READ_OPERATORS.has(operator) ? "read" : "write"
           const text = target.text
-          const found = classify(text, cwdAt(node.startIndex, scopeKey(node)), state)
+          const scope = scopeKey(node)
+          const found = classify(text, cwdAt(node.startIndex, scope), state)
           redirects.push({
             operator,
             effect,
             path: found,
             dynamic: found === undefined || found.relation === "unknown",
             append: operator === ">>" || operator === "&>>",
+            command: commandAt(node.startIndex, scope),
           })
           return
         }
@@ -692,13 +714,15 @@ export namespace ShellNormalizer {
           if (!match) return
           const operator = match[2]!
           const text = match[3]!.trim()
-          const found = classify(text, cwdAt(node.startIndex, scopeKey(node)), state)
+          const scope = scopeKey(node)
+          const found = classify(text, cwdAt(node.startIndex, scope), state)
           redirects.push({
             operator,
             effect: operator === "<" ? "read" : "write",
             path: found,
             dynamic: found === undefined || found.relation === "unknown",
             append: operator === ">>",
+            command: commandAt(node.startIndex, scope),
           })
         }
       })

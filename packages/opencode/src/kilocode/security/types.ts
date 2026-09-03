@@ -31,6 +31,14 @@ export type SecurityReasonCode =
   | "NETWORK_EGRESS"
   | "PACKAGE_INSTALL"
   | "PACKAGE_PUBLISH"
+  /** Package provenance is suspicious (unexpected registry, non-registry source, new / look-alike / unadopted package). */
+  | "PACKAGE_PROVENANCE"
+  /** The package could not be verified (registry metadata unavailable, package not found, ambiguous spec). */
+  | "PACKAGE_UNVERIFIED"
+  /** The install would execute install-time lifecycle scripts of an unvetted package. */
+  | "PACKAGE_LIFECYCLE"
+  /** An outbound action would carry credential material observed earlier in the session. */
+  | "SECRET_EXFILTRATION"
   | "POLICY_TAMPERING"
   | "SANDBOX_ESCALATION"
   | "UNCLASSIFIED_ACTION"
@@ -140,6 +148,11 @@ export interface NormalizedProcess {
   family?: "device" | "system-control" | "persistence" | "process-control" | "container" | "metadata"
   /** Metadata-only command (ls, stat, ps, ping ...) with no content access or side effect. */
   metadata: boolean
+  /**
+   * Static `NAME=value` assignments that prefix the command (`npm_config_registry=… npm install`).
+   * Names are kept verbatim; values are kept only for the package-provenance rules and never logged.
+   */
+  assignments?: Record<string, string>
 }
 
 export interface NormalizedCommand {
@@ -170,6 +183,8 @@ export interface NormalizedRedirect {
   path?: NormalizedPath
   dynamic: boolean
   append: boolean
+  /** Index into `commands` of the process the redirect is attached to (undefined when unattributable). */
+  command?: number
 }
 
 export type NormalizedAction =
