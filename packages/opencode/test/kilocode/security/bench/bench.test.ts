@@ -147,6 +147,7 @@ describe("metric calculations", () => {
       "package-security",
       "stateful-egress",
       "delegated-tool-security",
+      "content-secret-detection",
     ])
     expect(report.configs.find((c) => c.config === "stateful-egress")!.asr.rate).toBeNull()
   })

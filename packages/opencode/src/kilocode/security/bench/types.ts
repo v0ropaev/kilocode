@@ -19,9 +19,16 @@ import type { SecurityGate } from "@/kilocode/security/gate"
  * - `deterministic-security`: Deterministic Security (deterministic engine, no evidence layers);
  * - `package-security`: v1 + package provenance preflight (the package layer);
  * - `stateful-egress`: v1 + packages + stateful secret-egress protection (the egress layer) — i.e. all of v2;
- * - `delegated-tool-security`: v2 + delegated-authority classification of MCP / custom tools (v3).
+ * - `delegated-tool-security`: v2 + delegated-authority classification of MCP / custom tools (v3);
+ * - `content-secret-detection`: v3 + secret classification of ordinary workspace content (v4).
  */
-export type BenchConfig = "baseline" | "deterministic-security" | "package-security" | "stateful-egress" | "delegated-tool-security"
+export type BenchConfig =
+  | "baseline"
+  | "deterministic-security"
+  | "package-security"
+  | "stateful-egress"
+  | "delegated-tool-security"
+  | "content-secret-detection"
 
 export const BENCH_CONFIGS: readonly BenchConfig[] = [
   "baseline",
@@ -29,6 +36,7 @@ export const BENCH_CONFIGS: readonly BenchConfig[] = [
   "package-security",
   "stateful-egress",
   "delegated-tool-security",
+  "content-secret-detection",
 ]
 
 export const CONFIG_LABELS: Record<BenchConfig, string> = {
@@ -37,6 +45,7 @@ export const CONFIG_LABELS: Record<BenchConfig, string> = {
   "package-security": "+ Package Security",
   "stateful-egress": "+ Stateful Egress",
   "delegated-tool-security": "+ Delegated Tool Security",
+  "content-secret-detection": "+ Content Secret Detection",
 }
 
 export type ScenarioCategory =
@@ -49,6 +58,7 @@ export type ScenarioCategory =
   | "utility-network"
   | "utility-sensitive"
   | "utility-mcp"
+  | "utility-content"
   | "attack-destructive-filesystem"
   | "attack-sensitive-path"
   | "attack-shell-indirection"
@@ -60,18 +70,26 @@ export type ScenarioCategory =
   | "attack-package-install"
   | "attack-uncovered-tool"
   | "attack-mcp-tool"
+  | "attack-pre-gate"
+  | "attack-workspace-secret"
   | "attack-device"
 
 /** Categories that make up the package-specific ASR. */
 export const PACKAGE_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-package-install"]
 /** Categories that make up the exfiltration-specific ASR. */
 export const EXFIL_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-exfiltration", "attack-prompt-injection"]
+/** Categories that make up the pre-gate (no tool call involved) ASR. */
+export const PRE_GATE_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-pre-gate"]
+/** Categories that make up the ordinary-workspace-secret ASR. */
+export const WORKSPACE_SECRET_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-workspace-secret"]
 /** Categories that make up the MCP / custom-tool (delegated authority) ASR. */
 export const AUTHORITY_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-mcp-tool", "attack-uncovered-tool"]
 /** Categories that make up the package-specific utility rate. */
 export const PACKAGE_UTILITY_CATEGORIES: readonly ScenarioCategory[] = ["utility-package"]
 /** Categories that make up the delegated-authority utility rate. */
 export const AUTHORITY_UTILITY_CATEGORIES: readonly ScenarioCategory[] = ["utility-mcp"]
+/** Categories that make up the content-classification utility rate (the false-positive surface). */
+export const CONTENT_UTILITY_CATEGORIES: readonly ScenarioCategory[] = ["utility-content"]
 
 /**
  * Who wants the dangerous action. The engine is intent-agnostic today; the field exists so paired
@@ -85,8 +103,13 @@ export type Intent = "agent-initiated" | "user-requested" | "n/a"
  * - `side-effect`: a canary on the disposable filesystem or the local collector (the strong oracle).
  * - `decision-only`: the action is too dangerous to execute on the host (device wipe, ...), so success
  *   is judged by the security decision. Reported separately; never mixed into the side-effect ASR.
+ * - `pre-gate`: the damage happens without any tool call — at module import, during plugin
+ *   initialisation, inside a plugin hook, or through an HTTP surface. There is no trajectory to
+ *   adjudicate, so the scenario runs a probe instead of tool steps. Counted in the side-effect ASR
+ *   like any other observable damage, and broken out separately so it is never mistaken for a
+ *   trajectory result.
  */
-export type OracleKind = "side-effect" | "decision-only"
+export type OracleKind = "side-effect" | "decision-only" | "pre-gate"
 
 /** A single tool call the scripted agent attempts, in order. */
 export interface TrajectoryStep {
@@ -133,6 +156,16 @@ export interface ScenarioInstance {
   attackSucceeded?: Effect.Effect<boolean>
   /** True when the legitimate goal was achieved (utility scenarios, and safe-completion tails). */
   utilityCompleted?: Effect.Effect<boolean>
+  /**
+   * A `pre-gate` scenario's payload: the side effect that happens without a tool call. Runs instead of
+   * `steps`, under the same per-run timeout and isolation guard.
+   */
+  probe?: Effect.Effect<void>
+  /**
+   * Installed as the plugin `tool.execute.before` hook for this run, so the scenario can measure what
+   * a hook does at the real trigger site — outside the execution gate, whatever the configuration.
+   */
+  pluginHook?: Effect.Effect<void>
   /** Absolute paths the trajectory may touch; the isolation guard asserts each is in the sandbox. */
   guardedPaths: string[]
 }
@@ -152,7 +185,7 @@ export interface Scenario {
   /** Cross-links a paired scenario (agent-initiated ↔ user-requested), for the intent analysis. */
   pairedWith?: string
   /** The layer the scenario primarily exercises (for the per-layer breakdown). */
-  layer?: "deterministic" | "packages" | "egress" | "tools" | "residual"
+  layer?: "deterministic" | "packages" | "egress" | "tools" | "content" | "pre-gate" | "residual"
   build(ctx: ScenarioContext): Effect.Effect<ScenarioInstance>
 }
 

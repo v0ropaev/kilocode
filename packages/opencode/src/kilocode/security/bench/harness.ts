@@ -232,12 +232,13 @@ export namespace BenchHarness {
     // The user's own capability declarations travel with every configuration; only the
     // delegated-authority layer reads them, so they change nothing for the earlier rungs.
     const declared = { security_auto_tool_capabilities: BenchMcp.DECLARATIONS }
-    const on = (packages: boolean, egress: boolean, tools: boolean) => ({
+    const on = (packages: boolean, egress: boolean, tools: boolean, content: boolean) => ({
       experimental: {
         security_auto: true,
         security_auto_packages: packages,
         security_auto_egress: egress,
         security_auto_tools: tools,
+        security_auto_content: content,
         ...declared,
       },
     })
@@ -245,13 +246,15 @@ export namespace BenchHarness {
       case "baseline":
         return {}
       case "deterministic-security":
-        return on(false, false, false)
+        return on(false, false, false, false)
       case "package-security":
-        return on(true, false, false)
+        return on(true, false, false, false)
       case "stateful-egress":
-        return on(true, true, false)
+        return on(true, true, false, false)
       case "delegated-tool-security":
-        return on(true, true, true)
+        return on(true, true, true, false)
+      case "content-secret-detection":
+        return on(true, true, true, true)
     }
   }
 
@@ -277,6 +280,9 @@ export namespace BenchHarness {
    * step; read by the permission mock. Sequential execution (concurrency 1) keeps this race-free.
    */
   const human = { approve: false, approvals: 0 }
+
+  /** The plugin hook installed for the step currently executing (see the Plugin mock). */
+  const hooks: { before?: Effect.Effect<void> } = {}
 
   /**
    * Autonomous permission model. This is the "no human present" client every configuration shares:
@@ -309,7 +315,15 @@ export namespace BenchHarness {
     const sessions = Layer.mock(Session.Service)({
       get: (id: SessionID) => Effect.succeed(sessionInfo(id, os.tmpdir())),
     })
-    const plugin = Layer.mock(Plugin.Service)({ trigger: (_name, _input, output) => Effect.succeed(output) })
+    // The plugin trigger is the real call site (SessionTools.resolve fires it before the gate), so a
+    // scenario can install a hook here and measure exactly what a plugin hook can do outside the gate.
+    const plugin = Layer.mock(Plugin.Service)({
+      trigger: (name: string, _input: unknown, output: unknown) =>
+        Effect.gen(function* () {
+          if (name === "tool.execute.before" && hooks.before) yield* hooks.before
+          return output
+        }) as never,
+    })
     // Deterministic local stand-ins for connected MCP servers; the decision path is the real one.
     const mcp = Layer.mock(MCP.Service)({
       tools: () => Effect.succeed(BenchMcp.tools()),
@@ -544,10 +558,20 @@ export namespace BenchHarness {
       SecuritySessionState.reset(sessionID)
       human.approve = false
       human.approvals = 0
+      hooks.before = scenarioInstance.pluginHook
 
       const started = performance.now()
       const outcome = yield* Effect.gen(function* () {
         yield* scenarioInstance.setup
+
+        // Pre-gate scenarios have no trajectory to adjudicate: the damage happens at import, during
+        // plugin initialisation or through an HTTP surface. Run the probe and read the same oracle.
+        if (scenario.oracle === "pre-gate") {
+          if (scenarioInstance.probe) yield* scenarioInstance.probe
+          const attackSuccess = scenarioInstance.attackSucceeded ? yield* scenarioInstance.attackSucceeded : false
+          const utilitySuccess = scenarioInstance.utilityCompleted ? yield* scenarioInstance.utilityCompleted : null
+          return { executed: attackSuccess ? 1 : 0, blocked: 0, attackSuccess, utilitySuccess }
+        }
 
         // Decision-only attacks (device wipe, ...) are too dangerous to execute on the host. We ask the
         // engine for its decision without ever running the command; baseline (no engine) would run it.
@@ -561,6 +585,7 @@ export namespace BenchHarness {
             security_auto_packages: boolean
             security_auto_egress: boolean
             security_auto_tools: boolean
+            security_auto_content: boolean
             security_auto_tool_capabilities: Record<string, string[]>
           }
           const options: SecurityGate.Options = {
@@ -571,6 +596,7 @@ export namespace BenchHarness {
               packages: flags.security_auto_packages,
               egress: flags.security_auto_egress,
               tools: flags.security_auto_tools,
+              content: flags.security_auto_content,
             },
             declarations: ToolCapability.declarations(flags.security_auto_tool_capabilities),
           }
@@ -632,6 +658,7 @@ export namespace BenchHarness {
       disposeProvider()
       SecuritySessionState.reset(sessionID)
       human.approve = false
+      hooks.before = undefined
       const durationMs = performance.now() - started
 
       const allows = observations.filter((observation) => observation.decision === "allow").length
