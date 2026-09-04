@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+// kilocode_change - new file
 /**
  * Scores the semantic security layer against the development and held-out corpora.
  *
