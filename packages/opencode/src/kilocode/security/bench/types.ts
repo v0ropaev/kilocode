@@ -16,12 +16,13 @@ import type { SecurityGate } from "@/kilocode/security/gate"
  * The configurations under comparison, as an ablation ladder. Each step differs from the previous one
  * by exactly one layer, so the contribution of every layer is measurable on its own:
  * - `baseline`: Security Auto off (a maximally autonomous Kilo);
- * - `deterministic-security`: Deterministic Security (deterministic engine, no evidence layers);
- * - `package-security`: v1 + package provenance preflight (the package layer);
- * - `stateful-egress`: v1 + packages + stateful secret-egress protection (the egress layer) — i.e. all of v2;
- * - `delegated-tool-security`: v2 + delegated-authority classification of MCP / custom tools (v3);
- * - `content-secret-detection`: v3 + secret classification of ordinary workspace content (v4);
- * - `executable-code-trust`: v4 + trust boundary for repository-controlled executable code (v5).
+ * - `deterministic-security`: the deterministic ALLOW/ASK/DENY engine alone;
+ * - `package-security`: + pre-install package provenance preflight;
+ * - `stateful-egress`: + stateful sensitive-read → outbound-egress protection;
+ * - `delegated-tool-security`: + delegated-authority classification of MCP / custom tools;
+ * - `content-secret-detection`: + secret classification of ordinary workspace content;
+ * - `executable-code-trust`: + trust boundary for repository-controlled executable code;
+ * - `permissioned-extension-runtime`: + permissioned host process for approved extensions.
  */
 export type BenchConfig =
   | "baseline"
@@ -31,6 +32,7 @@ export type BenchConfig =
   | "delegated-tool-security"
   | "content-secret-detection"
   | "executable-code-trust"
+  | "permissioned-extension-runtime"
 
 export const BENCH_CONFIGS: readonly BenchConfig[] = [
   "baseline",
@@ -40,6 +42,7 @@ export const BENCH_CONFIGS: readonly BenchConfig[] = [
   "delegated-tool-security",
   "content-secret-detection",
   "executable-code-trust",
+  "permissioned-extension-runtime",
 ]
 
 export const CONFIG_LABELS: Record<BenchConfig, string> = {
@@ -50,6 +53,7 @@ export const CONFIG_LABELS: Record<BenchConfig, string> = {
   "delegated-tool-security": "+ Delegated Tool Security",
   "content-secret-detection": "+ Content Secret Detection",
   "executable-code-trust": "+ Executable Code Trust",
+  "permissioned-extension-runtime": "+ Permissioned Extension Runtime",
 }
 
 export type ScenarioCategory =
@@ -64,6 +68,7 @@ export type ScenarioCategory =
   | "utility-mcp"
   | "utility-content"
   | "utility-code"
+  | "utility-extension"
   | "attack-destructive-filesystem"
   | "attack-sensitive-path"
   | "attack-shell-indirection"
@@ -76,6 +81,7 @@ export type ScenarioCategory =
   | "attack-uncovered-tool"
   | "attack-mcp-tool"
   | "attack-pre-gate"
+  | "attack-extension-runtime"
   | "attack-workspace-secret"
   | "attack-device"
 
@@ -85,6 +91,8 @@ export const PACKAGE_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-p
 export const EXFIL_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-exfiltration", "attack-prompt-injection"]
 /** Categories that make up the pre-gate (no tool call involved) ASR. */
 export const PRE_GATE_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-pre-gate"]
+/** Categories that make up the extension-runtime ASR (what approved extension code can still do). */
+export const RUNTIME_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-extension-runtime"]
 /** Categories that make up the ordinary-workspace-secret ASR. */
 export const WORKSPACE_SECRET_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-workspace-secret"]
 /** Categories that make up the MCP / custom-tool (delegated authority) ASR. */
@@ -96,7 +104,7 @@ export const AUTHORITY_UTILITY_CATEGORIES: readonly ScenarioCategory[] = ["utili
 /** Categories that make up the content-classification utility rate (the false-positive surface). */
 export const CONTENT_UTILITY_CATEGORIES: readonly ScenarioCategory[] = ["utility-content"]
 /** Categories that make up the executable-code utility rate (plugins / custom tools that must load). */
-export const CODE_UTILITY_CATEGORIES: readonly ScenarioCategory[] = ["utility-code"]
+export const CODE_UTILITY_CATEGORIES: readonly ScenarioCategory[] = ["utility-code", "utility-extension"]
 
 /**
  * Who wants the dangerous action. The engine is intent-agnostic today; the field exists so paired
@@ -155,6 +163,8 @@ export interface ScenarioContext {
   codeTrust: boolean
   /** Whether widget-initiated MCP Apps calls are permitted for this run. */
   mcpAppsAllowed: boolean
+  /** Whether approved extensions run in the permissioned host for this run. */
+  extensionRuntime: boolean
   /** Build an absolute path guaranteed to sit inside the sandbox (throws otherwise). */
   path(...segments: string[]): string
 }
@@ -199,7 +209,7 @@ export interface Scenario {
   /** Cross-links a paired scenario (agent-initiated ↔ user-requested), for the intent analysis. */
   pairedWith?: string
   /** The layer the scenario primarily exercises (for the per-layer breakdown). */
-  layer?: "deterministic" | "packages" | "egress" | "tools" | "content" | "code" | "pre-gate" | "residual"
+  layer?: "deterministic" | "packages" | "egress" | "tools" | "content" | "code" | "runtime" | "pre-gate" | "residual"
   build(ctx: ScenarioContext): Effect.Effect<ScenarioInstance>
 }
 

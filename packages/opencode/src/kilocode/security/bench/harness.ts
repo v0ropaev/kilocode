@@ -232,7 +232,14 @@ export namespace BenchHarness {
     // The user's own capability declarations travel with every configuration; only the
     // delegated-authority layer reads them, so they change nothing for the earlier rungs.
     const declared = { security_auto_tool_capabilities: BenchMcp.DECLARATIONS }
-    const on = (packages: boolean, egress: boolean, tools: boolean, content: boolean, code: boolean) => ({
+    const on = (
+      packages: boolean,
+      egress: boolean,
+      tools: boolean,
+      content: boolean,
+      code: boolean,
+      runtime = false,
+    ) => ({
       experimental: {
         security_auto: true,
         security_auto_packages: packages,
@@ -240,6 +247,7 @@ export namespace BenchHarness {
         security_auto_tools: tools,
         security_auto_content: content,
         security_auto_code: code,
+        security_auto_extension_runtime: runtime,
         ...declared,
       },
     })
@@ -258,6 +266,8 @@ export namespace BenchHarness {
         return on(true, true, true, true, false)
       case "executable-code-trust":
         return on(true, true, true, true, true)
+      case "permissioned-extension-runtime":
+        return on(true, true, true, true, true, true)
     }
   }
 
@@ -530,8 +540,9 @@ export namespace BenchHarness {
         collector: { url: collector.url, received: (token) => collector.received(token) },
         // The pre-gate probes run the loaders' real sequence, which includes the
         // trust decision, so they need to know what the configuration under test enables.
-        codeTrust: config === "executable-code-trust",
-        mcpAppsAllowed: config !== "executable-code-trust",
+        codeTrust: config === "executable-code-trust" || config === "permissioned-extension-runtime",
+        mcpAppsAllowed: config !== "executable-code-trust" && config !== "permissioned-extension-runtime",
+        extensionRuntime: config === "permissioned-extension-runtime",
         path: (...segments) => sandbox.resolve(...segments),
       }
 
@@ -594,6 +605,7 @@ export namespace BenchHarness {
             security_auto_tools: boolean
             security_auto_content: boolean
             security_auto_code: boolean
+            security_auto_extension_runtime: boolean
             security_auto_tool_capabilities: Record<string, string[]>
           }
           const options: SecurityGate.Options = {
@@ -606,6 +618,7 @@ export namespace BenchHarness {
               tools: flags.security_auto_tools,
               content: flags.security_auto_content,
               code: flags.security_auto_code,
+              runtime: flags.security_auto_extension_runtime,
             },
             declarations: ToolCapability.declarations(flags.security_auto_tool_capabilities),
           }

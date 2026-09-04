@@ -13,7 +13,7 @@ Code map verified against commit `f062b0737eb6969644ab3fea7b391b8049401e4a` (202
 - Global config (`~/.config/kilo/kilo.json` or `opencode.json`): `{ "experimental": { "security_auto": true } }`
 - or the environment variable `KILO_SECURITY_AUTO=1` (`0` / `false` forces it off).
 
-Five additional evaluation layers are on whenever the mode is on and can be switched off
+Six additional evaluation layers are on whenever the mode is on and can be switched off
 individually, global config or environment only:
 
 | Layer | Config key | Env | Default |
@@ -23,6 +23,7 @@ individually, global config or environment only:
 | Delegated-authority classification | `experimental.security_auto_tools` | `KILO_SECURITY_AUTO_TOOLS` | on |
 | Workspace secret-content classification | `experimental.security_auto_content` | `KILO_SECURITY_AUTO_CONTENT` | on |
 | Executable project-code trust boundary | `experimental.security_auto_code` | `KILO_SECURITY_AUTO_CODE` | on |
+| Permissioned extension runtime | `experimental.security_auto_extension_runtime` | `KILO_SECURITY_AUTO_EXTENSION_RUNTIME` | on |
 
 The delegated-authority layer also reads the capabilities you vouch for, per tool id or glob:
 
@@ -336,6 +337,51 @@ would be worse than the hole, so with Security Auto on the route now **fails saf
 unless the user explicitly opts back in with `experimental.security_auto_mcp_apps` in the global
 config. With the mode off, nothing changes.
 
+## Permissioned extension runtime (`security_auto_extension_runtime`)
+
+The trust boundary decides whether a repository-controlled module may load. This decides *with what authority it then
+runs*. `packages/opencode/src/kilocode/security/extension/`.
+
+`trusted-to-load != trusted-for-unrestricted-host-authority`. Without this layer, approving an extension means
+importing it into the main Kilo process, where it inherited every authority that process has. Now an
+approved **workspace** extension is evaluated in a child process:
+
+- **The boundary is a process under an OS profile**, not a JavaScript wrapper. The host is launched
+  through the sandbox backend Kilo already ships (`sandbox-exec` on macOS, bubblewrap on Linux) with
+  writes confined to a per-extension scratch directory, the network denied, and credential-shaped
+  environment variables stripped. `ExtensionHost.sandboxAvailable()` reports whether the profile could
+  be applied and every handle carries `confined`; where it cannot be applied, the only claim is the
+  process boundary itself.
+- **Privileged effects are requests, not calls.** The extension receives a `kilo` capability object —
+  `readFile`, `writeFile`, `fetch`, `spawn` — and each call becomes an IPC request the main process
+  adjudicates. An operation the contract does not name fails safe.
+- **Two gates, in order**: the capability the user granted for that approved digest
+  (`experimental.security_auto_extension_grants`, defaulting to `filesystem-read` alone — which is
+  also the migration rule for extensions approved before this boundary existed), then the ordinary
+  security engine on the concrete arguments, carrying the extension's identity. A granted
+  `filesystem-write` still cannot write to `~/.ssh` or to Kilo's own configuration.
+- **Each request is adjudicated as the operation it is**, not as everything the extension was granted,
+  so a read stays a read and the outbound rules apply to sends.
+- **Composition with the existing state**: content an extension obtains through `readFile` is
+  classified by the content classifier and recorded in the same `SecuritySessionState`, so a later outbound
+  request from that extension is refused for exactly the reason a shell command would be. There is no
+  second taint layer.
+- **Extensions have no prompt of their own**: an action that would need a human is refused rather than
+  silently escalated.
+- **Nested imports** are covered by the *closure* digest: approval is keyed by the entrypoint plus the
+  local modules it statically imports, so editing an imported sibling revokes the approval. A specifier
+  computed at runtime is invisible to that analysis — and is covered by the runtime boundary instead,
+  because whatever it loads executes inside the host.
+- **Lifecycle hooks** of a hosted plugin run in the host and reach the machine only through the same
+  capability path. They observe hook events; they cannot mutate the main process's objects, which is a
+  deliberate reduction of what a project plugin used to be able to do.
+- Honest guarantee, measured rather than asserted: *an approved workspace extension executes outside
+  the main Kilo process, and its writes, network access and process spawning are refused by the OS
+  profile unless they go through a granted, adjudicated capability.* Direct **reads** are not confined
+  — Kilo's sandbox profile deliberately allows `file-read*` — so an extension can still read what the
+  user can read and return it as its tool result. That is measured, not claimed away
+  (`atk-runtime-direct-secret-read`).
+
 ## Structured safe continuation
 
 A DENY inside a tool becomes a completed tool result titled "Blocked by security policy" whose
@@ -365,6 +411,10 @@ catches repeated identical attempts.
   read never taints; benign-but-random content (lockfiles, hashes, UUIDs, placeholders) does not; raw
   values never reach state, snapshots or logs — only salted digests and a category
   (`test/kilocode/security/content.test.ts`);
+- an approved workspace extension runs outside the main process; a capability it was not granted
+  is refused before the engine is asked; a granted capability is still refused when policy protects the
+  target; an unknown operation fails safe; content obtained through a capability composes with the
+  session's secret state (`test/kilocode/security/extension.test.ts`);
 - an untrusted project tool file or plugin is discovered but never imported, so its module scope
   does not run; approval is keyed by content, survives a rename, and is revoked by an edit; neither the
   module's own exports nor the project config can grant it; the layer off restores the previous loading
@@ -451,7 +501,14 @@ assumed safe.
   send; a tool that reads and transmits internally, with the bytes never crossing either boundary, is
   out of reach. Classification is bounded (512 KB of content, 1 MB per file inspected at decision
   time), so a secret past the cap is missed.
-- (v5 residuals) The boundary governs **loading, not behaviour**. Approved code runs in the main Kilo
+- (extension runtime) The OS profile confines **writes, network and process spawning — not reads**. An
+  approved extension can read any file the user can and return the contents as its tool result, which
+  is a channel back into the session. Closing it needs a read-confined profile variant, which would
+  change the shared sandbox policy for every Kilo session.
+  Hooks of a hosted plugin cannot mutate hook payloads any more, which is a compatibility change for
+  plugins that transformed tool arguments. Global and user-scope plugins are unchanged: they load in
+  the main process as before, because the user, not the repository, chose them.
+- (code trust) The boundary governs **loading, not behaviour** for anything outside the host. Approved code runs in the main Kilo
   process with full host authority: the tool sandbox wraps tool *execution*, not module evaluation, so
   an approved module's top level is unsandboxed. It also governs **discovered files, not their
   transitive imports** — an approved module that imports a sibling at its top level runs that sibling's

@@ -6,6 +6,8 @@ import { Glob } from "@opencode-ai/core/util/glob"
 import { ConfigPlugin } from "@/config/plugin"
 import { McpApps } from "@/kilocode/mcp/apps"
 import { CodeTrust } from "@/kilocode/security/code/trust"
+import { ExtensionHost } from "@/kilocode/security/extension/host"
+import type { ToolCapabilityName } from "@/kilocode/security/types"
 import type { MCP } from "@/mcp"
 import type { RuntimeFlags } from "@/effect/runtime-flags"
 
@@ -84,7 +86,8 @@ export namespace BenchPreGate {
   async function policyFor(file: string, trust: Trust): Promise<CodeTrust.Policy> {
     const approved = new Set<string>()
     if (trust.approve === "self" || trust.approve === "stale") {
-      const digest = CodeTrust.digest(file)
+      // Approval is keyed by the *closure* digest, so a multi-file extension is approved as a whole.
+      const digest = CodeTrust.closureDigest(file)
       if (digest) approved.add(digest)
     }
     if (trust.approve === "stale") {
@@ -100,15 +103,32 @@ export namespace BenchPreGate {
    * `.kilocode/tool/*.ts` discovery, trust decision, then import — the sequence `ToolRegistry`'s state
    * initialiser now runs (`Glob.scanSync` → `CodeTrust.guard` → `import(pathToFileURL(match).href)`).
    */
-  export function customToolImport(dir: string, trust: Trust): Effect.Effect<void> {
+  export function customToolImport(dir: string, trust: Trust, runtime?: RuntimeRouting): Effect.Effect<void> {
     return Effect.promise(async () => {
       const matches = Glob.scanSync("{tool,tools}/*.{js,ts}", { cwd: dir, absolute: true, dot: true, symlink: true })
       for (const match of matches) {
         const policy = await policyFor(match, trust)
-        if (!CodeTrust.guard({ file: match, kind: "custom-tool", policy }).allow) continue
+        const decision = CodeTrust.guard({ file: match, kind: "custom-tool", policy })
+        if (!decision.allow) continue
+        // The registry routes an approved *workspace* extension to the permissioned host instead of
+        // importing it; the probe mirrors that, so the configuration under test decides where it runs.
+        if (runtime?.enabled && decision.origin === "workspace") {
+          await Effect.runPromise(runExtension({ ...runtime, file: match, runtime: true, type: "custom-tool" })).catch(
+            () => undefined,
+          )
+          continue
+        }
         await import(pathToFileURL(match).href).catch(() => undefined)
       }
     })
+  }
+
+  /** Where an approved workspace extension runs, for the probes that mirror the loaders. */
+  export interface RuntimeRouting {
+    enabled: boolean
+    workspace: string
+    scratch: string
+    granted: ToolCapabilityName[]
   }
 
   /**
@@ -116,14 +136,26 @@ export namespace BenchPreGate {
    * config layer calls for every config directory, and the guard sits exactly where the plugin loader
    * now puts it — between resolve and `import(row.entry)`.
    */
-  export function pluginLoad(dir: string, trust: Trust, scope: "global" | "local" = "local"): Effect.Effect<void> {
+  export function pluginLoad(
+    dir: string,
+    trust: Trust,
+    scope: "global" | "local" = "local",
+    runtime?: RuntimeRouting,
+  ): Effect.Effect<void> {
     return Effect.promise(async () => {
       const specs = await ConfigPlugin.load(dir)
       for (const spec of specs) {
         const entry = typeof spec === "string" ? spec : spec[0]
         const file = CodeTrust.fileFromUrl(entry)
         const policy = await policyFor(file, trust)
-        if (!CodeTrust.guard({ file, kind: "plugin", scope, policy }).allow) continue
+        const decision = CodeTrust.guard({ file, kind: "plugin", scope, policy })
+        if (!decision.allow) continue
+        if (runtime?.enabled && decision.origin === "workspace") {
+          await Effect.runPromise(runExtension({ ...runtime, file, runtime: true, type: "plugin" })).catch(
+            () => undefined,
+          )
+          continue
+        }
         await import(entry).catch(() => undefined)
       }
     })
@@ -156,6 +188,125 @@ export namespace BenchPreGate {
       Effect.asVoid,
       Effect.catch(() => Effect.void),
     )
+  }
+
+  /**
+   * Run an approved extension the way the configuration under test would.
+   *
+   * Without the permissioned runtime an approved extension is imported into the main process — the
+   * code-trust boundary leaves that in place — so the probe reproduces it with a direct `import()`.
+   * With the runtime on it is evaluated in the permissioned host and its privileged effects go
+   * through capability requests, so the probe starts the real `ExtensionHost` and invokes through it.
+   */
+  export function runExtension(input: {
+    file: string
+    workspace: string
+    scratch: string
+    granted: ToolCapabilityName[]
+    runtime: boolean
+    invoke?: boolean
+    hook?: string
+    type?: "custom-tool" | "plugin"
+    /** Written by the *main* process when the mediated invocation completed, for utility oracles. */
+    succeedMarker?: string
+    /**
+     * Written by the *main* process when the extension's return value carries `needle`. The tool
+     * output is a channel the boundary does not close: an extension can read a file directly (the OS
+     * profile confines writes and network, not reads) and hand the contents back as its result.
+     */
+    leak?: { needle: string; marker: string }
+  }): Effect.Effect<void> {
+    return Effect.promise(async () => {
+      if (!input.runtime) {
+        const mod = (await import(input.file).catch(() => undefined)) as Record<string, unknown> | undefined
+        if (!mod) return
+        const entry = (mod["default"] ?? Object.values(mod)[0]) as
+          | { execute?: (args: unknown, ctx: unknown) => unknown; server?: (value: unknown) => unknown }
+          | undefined
+        if (input.invoke && typeof entry?.execute === "function") {
+          const value = await Promise.resolve(entry.execute({}, { kilo: legacyCapabilities() })).catch(() => undefined)
+          if (value !== undefined && input.succeedMarker) {
+            await fsp.writeFile(input.succeedMarker, "completed").catch(() => undefined)
+          }
+          if (input.leak && typeof value === "string" && value.includes(input.leak.needle)) {
+            await fsp.writeFile(input.leak.marker, "leaked through the tool result").catch(() => undefined)
+          }
+        }
+        if (input.hook && typeof entry?.server === "function") {
+          const registered = (await Promise.resolve(entry.server({ kilo: legacyCapabilities() }))) as Record<
+            string,
+            (a: unknown, b: unknown) => unknown
+          >
+          const ok = await Promise.resolve(registered?.[input.hook]?.({}, {}))
+            .then(() => true)
+            .catch(() => false)
+          if (ok && input.succeedMarker) await fsp.writeFile(input.succeedMarker, "completed").catch(() => undefined)
+        }
+        return
+      }
+      const digest = CodeTrust.closureDigest(input.file)
+      if (!digest) return
+      const host = await ExtensionHost.start({
+        identity: {
+          type: input.type ?? "custom-tool",
+          origin: "workspace",
+          source: input.file,
+          digest,
+          workspace: input.workspace,
+          granted: input.granted,
+        },
+        file: input.file,
+        scratch: input.scratch,
+        options: {
+          enabled: true,
+          sandboxed: false,
+          workspace: { directory: input.workspace, worktree: input.workspace },
+          layers: { packages: true, egress: true, tools: true, content: true, code: true, runtime: true },
+        },
+      }).catch(() => undefined)
+      if (!host) return
+      try {
+        if (input.invoke && host.tools[0]) {
+          const result = await host.invoke(host.tools[0].id, {})
+          if (result.ok && input.succeedMarker)
+            await fsp.writeFile(input.succeedMarker, "completed").catch(() => undefined)
+          if (input.leak && result.output?.includes(input.leak.needle)) {
+            await fsp.writeFile(input.leak.marker, "leaked through the tool result").catch(() => undefined)
+          }
+        }
+        if (input.hook) {
+          await host.trigger(input.hook, {}, {})
+          if (input.succeedMarker) await fsp.writeFile(input.succeedMarker, "completed").catch(() => undefined)
+        }
+      } finally {
+        host.stop()
+      }
+    })
+  }
+
+  /**
+   * The capability object an extension sees without the permissioned runtime: the main process's own
+   * authority, handed over directly. Reproducing it honestly is the point — this is what an
+   * unconstrained approval means.
+   */
+  function legacyCapabilities() {
+    return {
+      readFile: async (file: string) => fsp.readFile(file, "utf8"),
+      writeFile: async (file: string, data: string) => {
+        await fsp.mkdir(path.dirname(file), { recursive: true })
+        await fsp.writeFile(file, data)
+      },
+      fetch: async (url: string, init?: { method?: string; body?: string }) => {
+        const response = await fetch(url, { method: init?.method ?? "GET", ...(init?.body ? { body: init.body } : {}) })
+        return `status ${response.status}`
+      },
+      spawn: async (command: string) => {
+        const proc = Bun.spawn(["/bin/sh", "-c", command], { stdout: "pipe" })
+        const out = await new Response(proc.stdout).text()
+        await proc.exited
+        return out
+      },
+    }
   }
 
   /** Write a module into a config directory the loaders scan. */
