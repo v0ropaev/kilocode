@@ -1,0 +1,98 @@
+%% Security Auto Mode for Kilo Code — каноничная схема слоёв.
+%% Источник фактов: submission/SOURCE_OF_TRUTH.md, docs/security-auto-mode.md.
+%% Рендер: mmdc -i architecture.mmd -o architecture.svg
+
+flowchart TB
+  classDef untrusted fill:#fdf2f2,stroke:#b3403a,stroke-width:1px,color:#3a1614
+  classDef kilo fill:#f1f6fb,stroke:#2f6ea8,stroke-width:1px,color:#12293d
+  classDef evidence fill:#f5f3fb,stroke:#6a53a0,stroke-width:1px,color:#231a3b
+  classDef verdict fill:#f3faf4,stroke:#2f7d4f,stroke-width:1px,color:#123320
+  classDef os fill:#fbf7ee,stroke:#a3781a,stroke-width:1px,color:#3a2c0d
+  classDef stop fill:#f6e8e8,stroke:#93292b,stroke-width:1px,color:#3a1313
+  classDef boundary fill:#ffffff,stroke:#1f2937,stroke-width:2px,color:#111827
+
+  subgraph UNTRUSTED["Untrusted: намерение модели и содержимое репозитория"]
+    direction TB
+    CALL["Агент: side-effecting tool call"]
+    CONTENT["Содержимое репозитория: исполняемый модуль, проектный плагин, README, манифест"]
+  end
+
+  BOUND{{"Trust boundary: ниже решает только код Kilo и профиль ОС, не модель"}}
+
+  CALL --> BOUND
+  CONTENT --> BOUND
+
+  subgraph ENFORCE["Kilo-owned enforcement"]
+    direction TB
+
+    NORM["Normalization: разбор shell в AST через Tree-sitter, раскрытие обёрток и вложенных payload, классификация путей по эффекту"]
+    GATE["SecurityGate: единственная точка, которую проходит каждый покрытый tool call до побочного эффекта"]
+    ENGINE["SecurityEngine: детерминированные hard rules, чистая синхронная оценка, неизменяемый набор правил"]
+
+    subgraph EV["Evidence layers: структурные свидетельства в тот же reducer"]
+      direction LR
+      PKG["Package Security: provenance пакета оценивается до запуска package manager"]
+      EGR["Stateful Egress: посессионное состояние, только солёные digest'ы, без сырых значений"]
+      DTS["Delegated Tool Security: capability-модель для MCP, custom и plugin инструментов; provenance структурная"]
+      CSD["Content Secret Detection: секрет определяется по содержимому, именованные детекторы, энтропия не доказательство"]
+    end
+
+    REDUCE["Монотонный reducer: DENY сильнее ASK, ASK сильнее ALLOW. Слои только ужесточают, сбой слоя равен hard ASK"]
+    VERDICT{"Authority decision"}
+  end
+
+  BOUND -->|"tool call уже существует"| NORM
+  NORM --> GATE
+  GATE --> ENGINE
+  ENGINE --> EV
+  ENGINE --> REDUCE
+  PKG --> REDUCE
+  EGR --> REDUCE
+  DTS --> REDUCE
+  CSD --> REDUCE
+  REDUCE --> VERDICT
+
+  ALLOW["ALLOW: снимается только встроенный ask по умолчанию, явные user и project правила остаются в силе"]
+  ASK["ASK: hard ASK требует живого ответа человека и не снимается ни автономным режимом, ни сохранённым always allow"]
+  DENY["DENY: исполнитель не вызывается, запрос разрешения даже не создаётся, возвращается structured blocked result"]
+
+  VERDICT --> ALLOW
+  VERDICT --> ASK
+  VERDICT --> DENY
+
+  HUMAN["Человек отвечает на hard ASK"]
+  EXEC["Executor: реальный инструмент под OS sandbox"]
+  STOPCALL["Побочный эффект не наступил"]
+
+  ALLOW --> EXEC
+  ASK --> HUMAN
+  HUMAN -->|"да"| EXEC
+  HUMAN -->|"нет"| STOPCALL
+  DENY --> STOPCALL
+
+  subgraph PREGATE["Границы, работающие до того, как tool call появился"]
+    direction TB
+    CT["Executable Code Trust: discovery != execution. Кандидат найден, разрешён и классифицирован, но не импортирован до решения о доверии выше уровня проекта; одобрение по SHA-256 замыкания"]
+    HOST["Permissioned Extension Runtime: одобренное расширение исполняется в дочернем процессе под профилем ОС, без собственного prompt"]
+    RC["Read-Confinement: ambient-чтения хоста сужены до его рабочего набора на уровне ОС, сопоставление по разрешённому пути"]
+  end
+
+  BOUND -->|"tool call ещё не существует"| CT
+  CT -->|"байты не одобрены: модуль не импортируется, module scope не выполняется"| STOPIMPORT["Кандидат не загружен"]
+  CT -->|"байты одобрены пользователем"| HOST
+  HOST -->|"ambient-чтение"| RC
+  RC -->|"вне рабочего набора: отказ профиля ОС"| STOPREAD["Содержимое не раскрыто; видны только метаданные пути"]
+  HOST -->|"привилегированный эффект становится capability request по IPC"| GATE
+
+  class CALL,CONTENT untrusted
+  class BOUND boundary
+  class NORM,GATE,ENGINE,REDUCE kilo
+  class PKG,EGR,DTS,CSD evidence
+  class VERDICT,ALLOW,ASK,DENY,HUMAN verdict
+  class EXEC,HOST,RC,CT os
+  class STOPCALL,STOPIMPORT,STOPREAD stop
+
+  style UNTRUSTED fill:#fdf8f8,stroke:#b3403a,stroke-dasharray:5 4,color:#3a1614
+  style ENFORCE fill:#f8fbfd,stroke:#2f6ea8,color:#12293d
+  style EV fill:#fbfafd,stroke:#6a53a0,stroke-dasharray:5 4,color:#231a3b
+  style PREGATE fill:#fdfbf5,stroke:#a3781a,color:#3a2c0d

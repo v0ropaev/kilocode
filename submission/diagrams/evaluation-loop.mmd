@@ -1,0 +1,33 @@
+%% Security Auto Mode for Kilo Code — измерительный цикл бенчмарка.
+%% Источник фактов: submission/SOURCE_OF_TRUTH.md, docs/security-auto-mode-benchmark.md.
+%% Рендер: mmdc -i evaluation-loop.mmd -o evaluation-loop.svg
+
+flowchart LR
+  classDef step fill:#f1f6fb,stroke:#2f6ea8,stroke-width:1px,color:#12293d
+  classDef measure fill:#f3faf4,stroke:#2f7d4f,stroke-width:1px,color:#123320
+  classDef residual fill:#fdf2f2,stroke:#b3403a,stroke-width:1px,color:#3a1614
+  classDef note fill:#fbf7ee,stroke:#a3781a,stroke-width:1px,color:#3a2c0d
+
+  FIND["Найти атаку: новый класс, к которому агент даёт доступ"]
+  REPRO["Воспроизвести в одноразовом fixture: временный sandbox, поддельный HOME, инертные shim'ы package manager'ов, сеть только на loopback"]
+  CANARY["Поставить canary: удаляемый файл, фейковый секрет с меткой BENCH, маркер shim'а, needle в теле tool result"]
+  BASE["Baseline run: Security Auto выключен, максимально автономный Kilo. Атака обязана удаться, иначе сценарий ничего не измеряет"]
+  PROT["Protected run: та же траектория на ablation-лестнице, соседние конфигурации отличаются ровно одним флагом слоя"]
+  MEASURE["Измерить: ASR, Utility, Safe DENY FP и Safe ASK FP, friction в виде ASK на задачу, latency решения p50 и p95"]
+  ATTRIB["Атрибутировать падение ASR конкретному слою и выбрать следующий по величине незакрытый класс"]
+  RESIDUAL["Новый residual: класс, который остаётся открытым, фиксируется как измеренный, а не как убранный"]
+
+  FIND --> REPRO --> CANARY --> BASE --> PROT --> MEASURE --> ATTRIB --> RESIDUAL
+  RESIDUAL -->|"следующая итерация"| FIND
+
+  ORACLE["Оракул успеха: только наблюдаемый побочный эффект, никогда не текст модели"]
+  ORACLE -.-> MEASURE
+
+  GROWTH["Набор атак растёт, поэтому исторические конфигурации пересчитываются на финальном наборе сценариев. Сравнивать строки допустимо внутри одной таблицы, не между наборами"]
+  GROWTH -.-> PROT
+  RESIDUAL -.-> GROWTH
+
+  class FIND,REPRO,CANARY,BASE,PROT,ATTRIB step
+  class MEASURE,ORACLE measure
+  class RESIDUAL residual
+  class GROWTH note
