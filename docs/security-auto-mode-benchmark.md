@@ -20,7 +20,7 @@ The configurations differ by exactly one thing each — a flag the config layer 
 contribution of every layer is measurable on its own:
 
 | Configuration | Flags | Adds |
-| --- | --- | --- |
+|---|---|---|
 | `baseline` | Security Auto off | — (maximally autonomous Kilo) |
 | `deterministic-security` | `security_auto` | the deterministic ALLOW/ASK/DENY engine |
 | `package-security` | `+ security_auto_packages` | pre-install package provenance preflight |
@@ -85,7 +85,7 @@ scenario (fixture) ──► BenchHarness.runAll (ladder order)
 Every configuration shares one "no human present" permission client, mirroring `kilo run --auto`:
 
 | Engine decision | Under autonomy | Instrumented as |
-| --- | --- | --- |
+|---|---|---|
 | `DENY` (hard) | `SecurityDeniedError` → structured blocked result; tool never runs | `denies`, blocked |
 | `ASK` hard | cannot be auto-approved → rejected → tool never runs | `asks` (autonomy-breaking friction) |
 | `ASK` hard, **user approves** | a scenario step marked `approve` models a trusted "yes" → tool runs | `approvals` |
@@ -223,7 +223,7 @@ A rate over zero cases is reported `n/a`, never a misleading `0`.
 agent's own tools (the weakest host state). Deterministic fixtures.
 
 | Configuration | Overall ASR | Extension-runtime ASR | Extension-read ASR | Pre-gate ASR | Workspace-secret ASR | Exfil ASR | MCP/custom ASR | Package ASR | Utility | Extension utility | ASK/task | p95 |
-| --- | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | Baseline | 100% (237/237) | 100% (57/57) | 100% (33/33) | 100% (27/27) | 100% (33/33) | 100% (18/18) | 100% (30/30) | 100% (42/42) | 100% | 100% | 0.00 | n/a |
 | Deterministic Security | 86% (204/237) | 100% | 100% | 100% | 100% | 83% | 100% | 100% | 100% | 100% | 0.07 | 1.00 ms |
 | + Package Security | 68% (162/237) | 100% | 100% | 100% | 100% | 83% | 100% | **0%** | 98% | 100% | 0.13 | 0.97 ms |
@@ -266,14 +266,16 @@ is not a prompt.
 startup would not be "1 ms overhead":
 
 | Measurement | p50 | p95 |
-| --- | --: | --: |
+|---|---:|---:|
 | Cold start, reads confined (spawn + profile + module load) | 22.9 ms | 32.8 ms |
 | Cold start, reads open | 21.9 ms | 22.7 ms |
 | Warm capability roundtrip, policy decision included | 0.43 ms | 0.87 ms |
 | Policy decision alone | 0.29 ms | 0.31 ms |
 
-Read confinement adds about 1 ms to a cold start and nothing measurable to a warm call. Security
-decision latency across the whole suite stays ~1 ms at p95, and mean task latency is unchanged.
+Read confinement adds about 1 ms to a cold start and nothing measurable to a warm call, and it leaves
+mean task latency unchanged (17.16 ms → 17.19 ms). Security decision latency across the whole suite
+stays ~1 ms at p95. Across the ladder, mean task latency moves 15.34 ms → 17.19 ms and stays
+confounded: a blocked attack skips the real work the baseline performs.
 
 **Comparability note.** The suite grew 115 → 130 scenarios and the extension-runtime ASR now spans both
 runtime classes, so every column differs from the previous table for reasons that are not only
