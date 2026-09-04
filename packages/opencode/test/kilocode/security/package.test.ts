@@ -602,7 +602,7 @@ describe("SecurityGate with the package layer", () => {
     enabled: true,
     sandboxed: false,
     workspace: { directory: ws, worktree: ws },
-    layers: { packages, egress: false, tools: false, content: false, code: false },
+    layers: { packages, egress: false, tools: false, content: false, code: false, runtime: false },
   })
 
   function evaluate(command: string, packages: boolean) {

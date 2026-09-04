@@ -49,7 +49,7 @@ function options(overrides: Partial<SecurityGate.Options> = {}): SecurityGate.Op
     enabled: true,
     sandboxed: false,
     workspace: { directory: ws, worktree: ws },
-    layers: { packages: false, egress: true, tools: true, content: false, code: false },
+    layers: { packages: false, egress: true, tools: true, content: false, code: false, runtime: false },
     ...overrides,
   }
 }
@@ -796,7 +796,9 @@ describe("SecurityGate.execute", () => {
   })
 
   test("the tool layer off keeps the earlier semantics: no descriptor is built", () => {
-    const noTools = options({ layers: { packages: true, egress: true, tools: false, content: false, code: false } })
+    const noTools = options({
+      layers: { packages: true, egress: true, tools: false, content: false, code: false, runtime: false },
+    })
     expect(
       SecurityGate.describe({ tool: "helper", provenance: "workspace", args: {}, options: noTools }),
     ).toBeUndefined()

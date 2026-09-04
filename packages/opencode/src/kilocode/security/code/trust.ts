@@ -146,6 +146,74 @@ export namespace CodeTrust {
     }
   }
 
+  const LOCAL_IMPORT =
+    /(?:^|[^\w$])(?:import|export)\s+(?:[^"';]*?\sfrom\s*)?["'](\.[^"']*)["']|import\(\s*["'](\.[^"']*)["']\s*\)/g
+  const EXTENSIONS = ["", ".ts", ".js", ".mjs", ".cjs", ".tsx", "/index.ts", "/index.js"]
+  const MAX_CLOSURE = 64
+
+  /**
+   * The local files an entrypoint statically pulls in, transitively. Only relative specifiers are
+   * followed: a bare package specifier is a dependency of the runtime, not part of the extension's own
+   * reviewed content.
+   *
+   * This is what makes approval mean "these files", not "this one file plus whatever it imports". A
+   * specifier computed at runtime is not visible here — that case is covered by the permissioned
+   * runtime instead, where the imported code executes inside the host rather than in Kilo's process.
+   */
+  export function closure(file: string): string[] {
+    const start = canonical(fileFromUrl(file))
+    const seen = new Set<string>([start])
+    const queue = [start]
+    while (queue.length > 0 && seen.size <= MAX_CLOSURE) {
+      const current = queue.shift()!
+      let text: string
+      try {
+        const stat = statSync(current)
+        if (!stat.isFile() || stat.size > MAX_FILE) continue
+        text = readFileSync(current, "utf8")
+      } catch {
+        continue
+      }
+      for (const match of text.matchAll(LOCAL_IMPORT)) {
+        const specifier = match[1] ?? match[2]
+        if (!specifier) continue
+        const base = path.resolve(path.dirname(current), specifier)
+        for (const suffix of EXTENSIONS) {
+          const candidate = canonical(base + suffix)
+          try {
+            if (!statSync(candidate).isFile()) continue
+          } catch {
+            continue
+          }
+          if (!seen.has(candidate)) {
+            seen.add(candidate)
+            queue.push(candidate)
+          }
+          break
+        }
+      }
+    }
+    return [...seen].sort()
+  }
+
+  /**
+   * The digest an approval is keyed by. For a single-file extension it is that file's digest, so a
+   * plain-file approval keeps working. For an extension that imports its own local modules it is a
+   * digest over the whole closure, so editing an imported sibling revokes the entrypoint's approval
+   * too.
+   */
+  export function closureDigest(file: string): string | undefined {
+    const files = closure(file)
+    if (files.length <= 1) return digest(file)
+    const hash = createHash("sha256")
+    for (const item of files) {
+      const found = digest(item)
+      if (found === undefined) return undefined
+      hash.update(path.basename(item)).update("\0").update(found).update("\n")
+    }
+    return hash.digest("hex")
+  }
+
   /**
    * Decide whether a discovered file may be imported. Pure with respect to the filesystem apart from
    * reading the candidate itself.
@@ -154,7 +222,7 @@ export namespace CodeTrust {
     const origin = classify(input)
     if (!input.policy.enabled) return { allow: true, origin, reason: "layer-off" }
     if (origin === "builtin" || origin === "trusted-config") return { allow: true, origin, reason: "trusted-origin" }
-    const found = digest(input.file)
+    const found = closureDigest(input.file)
     if (found === undefined) return { allow: false, origin, reason: "unreadable" }
     if (input.policy.approved.has(found)) return { allow: true, origin, digest: found, reason: "approved-digest" }
     return { allow: false, origin, digest: found, reason: "untrusted-origin" }
@@ -173,7 +241,7 @@ export namespace CodeTrust {
     const decision = evaluate(input)
     if (decision.allow && decision.digest !== undefined) {
       // TOCTOU re-check: the approval was matched against a digest read a moment ago.
-      const again = digest(input.file)
+      const again = closureDigest(input.file)
       if (again !== decision.digest) {
         record(input.kind, input.file, decision.origin, again)
         return { allow: false, origin: decision.origin, digest: again, reason: "content-changed" }
