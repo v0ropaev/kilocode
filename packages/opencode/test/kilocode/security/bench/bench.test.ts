@@ -150,6 +150,7 @@ describe("metric calculations", () => {
       "content-secret-detection",
       "executable-code-trust",
       "permissioned-extension-runtime",
+      "read-confined-extension-runtime",
     ])
     expect(report.configs.find((c) => c.config === "stateful-egress")!.asr.rate).toBeNull()
   })
@@ -238,6 +239,7 @@ describe("isolation guard", () => {
           codeTrust: false,
           mcpAppsAllowed: true,
           extensionRuntime: false,
+          extensionReadConfinement: false,
           path: (...segments: string[]) => sandbox.resolve(...segments),
         }
         const instance = await Effect.runPromise(scenario.build(ctx))

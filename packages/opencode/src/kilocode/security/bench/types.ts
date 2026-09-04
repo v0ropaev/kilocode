@@ -22,7 +22,8 @@ import type { SecurityGate } from "@/kilocode/security/gate"
  * - `delegated-tool-security`: + delegated-authority classification of MCP / custom tools;
  * - `content-secret-detection`: + secret classification of ordinary workspace content;
  * - `executable-code-trust`: + trust boundary for repository-controlled executable code;
- * - `permissioned-extension-runtime`: + permissioned host process for approved extensions.
+ * - `permissioned-extension-runtime`: + permissioned host process for approved extensions;
+ * - `read-confined-extension-runtime`: + ambient reads confined to the extension's working set.
  */
 export type BenchConfig =
   | "baseline"
@@ -33,6 +34,7 @@ export type BenchConfig =
   | "content-secret-detection"
   | "executable-code-trust"
   | "permissioned-extension-runtime"
+  | "read-confined-extension-runtime"
 
 export const BENCH_CONFIGS: readonly BenchConfig[] = [
   "baseline",
@@ -43,6 +45,7 @@ export const BENCH_CONFIGS: readonly BenchConfig[] = [
   "content-secret-detection",
   "executable-code-trust",
   "permissioned-extension-runtime",
+  "read-confined-extension-runtime",
 ]
 
 export const CONFIG_LABELS: Record<BenchConfig, string> = {
@@ -54,6 +57,7 @@ export const CONFIG_LABELS: Record<BenchConfig, string> = {
   "content-secret-detection": "+ Content Secret Detection",
   "executable-code-trust": "+ Executable Code Trust",
   "permissioned-extension-runtime": "+ Permissioned Extension Runtime",
+  "read-confined-extension-runtime": "+ Read-Confinement",
 }
 
 export type ScenarioCategory =
@@ -82,6 +86,7 @@ export type ScenarioCategory =
   | "attack-mcp-tool"
   | "attack-pre-gate"
   | "attack-extension-runtime"
+  | "attack-extension-read"
   | "attack-workspace-secret"
   | "attack-device"
 
@@ -92,7 +97,12 @@ export const EXFIL_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-exf
 /** Categories that make up the pre-gate (no tool call involved) ASR. */
 export const PRE_GATE_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-pre-gate"]
 /** Categories that make up the extension-runtime ASR (what approved extension code can still do). */
-export const RUNTIME_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-extension-runtime"]
+export const RUNTIME_ATTACK_CATEGORIES: readonly ScenarioCategory[] = [
+  "attack-extension-runtime",
+  "attack-extension-read",
+]
+/** Categories that make up the ambient-read ASR (what an approved extension can still read directly). */
+export const READ_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-extension-read"]
 /** Categories that make up the ordinary-workspace-secret ASR. */
 export const WORKSPACE_SECRET_ATTACK_CATEGORIES: readonly ScenarioCategory[] = ["attack-workspace-secret"]
 /** Categories that make up the MCP / custom-tool (delegated authority) ASR. */
@@ -165,6 +175,8 @@ export interface ScenarioContext {
   mcpAppsAllowed: boolean
   /** Whether approved extensions run in the permissioned host for this run. */
   extensionRuntime: boolean
+  /** Whether that host also confines what the extension may read directly. */
+  extensionReadConfinement: boolean
   /** Build an absolute path guaranteed to sit inside the sandbox (throws otherwise). */
   path(...segments: string[]): string
 }

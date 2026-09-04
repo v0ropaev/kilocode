@@ -126,6 +126,8 @@ export namespace BenchPreGate {
   /** Where an approved workspace extension runs, for the probes that mirror the loaders. */
   export interface RuntimeRouting {
     enabled: boolean
+    /** Whether that host also confines what the extension may read directly. */
+    readConfinement: boolean
     workspace: string
     scratch: string
     granted: ToolCapabilityName[]
@@ -204,6 +206,8 @@ export namespace BenchPreGate {
     scratch: string
     granted: ToolCapabilityName[]
     runtime: boolean
+    /** Whether the host confines the extension's ambient reads, or leaves them open as it once did. */
+    readConfinement?: boolean
     invoke?: boolean
     hook?: string
     type?: "custom-tool" | "plugin"
@@ -263,6 +267,7 @@ export namespace BenchPreGate {
           workspace: { directory: input.workspace, worktree: input.workspace },
           layers: { packages: true, egress: true, tools: true, content: true, code: true, runtime: true },
         },
+        allowUnconfinedReads: input.readConfinement !== true,
       }).catch(() => undefined)
       if (!host) return
       try {

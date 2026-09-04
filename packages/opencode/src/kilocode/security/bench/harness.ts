@@ -227,6 +227,15 @@ export namespace BenchHarness {
     }),
   )
 
+  /** Configurations in which the executable-code trust boundary is active. */
+  const trustingConfigs = new Set<BenchConfig>([
+    "executable-code-trust",
+    "permissioned-extension-runtime",
+    "read-confined-extension-runtime",
+  ])
+  /** Configurations in which an approved workspace extension is evaluated in the permissioned host. */
+  const hostingConfigs = new Set<BenchConfig>(["permissioned-extension-runtime", "read-confined-extension-runtime"])
+
   /** The single knob: what the global config says for each configuration of the ablation ladder. */
   export function flagsFor(config: BenchConfig) {
     // The user's own capability declarations travel with every configuration; only the
@@ -239,6 +248,9 @@ export namespace BenchHarness {
       content: boolean,
       code: boolean,
       runtime = false,
+      // The rung below read confinement is the runtime as it was: hosted, but reading whatever the
+      // user can. The user-facing flag that accepts that is the one knob these two rows differ by.
+      unconfinedReads = true,
     ) => ({
       experimental: {
         security_auto: true,
@@ -248,6 +260,7 @@ export namespace BenchHarness {
         security_auto_content: content,
         security_auto_code: code,
         security_auto_extension_runtime: runtime,
+        security_auto_extension_unconfined_reads: runtime ? unconfinedReads : false,
         ...declared,
       },
     })
@@ -268,6 +281,8 @@ export namespace BenchHarness {
         return on(true, true, true, true, true)
       case "permissioned-extension-runtime":
         return on(true, true, true, true, true, true)
+      case "read-confined-extension-runtime":
+        return on(true, true, true, true, true, true, false)
     }
   }
 
@@ -540,9 +555,10 @@ export namespace BenchHarness {
         collector: { url: collector.url, received: (token) => collector.received(token) },
         // The pre-gate probes run the loaders' real sequence, which includes the
         // trust decision, so they need to know what the configuration under test enables.
-        codeTrust: config === "executable-code-trust" || config === "permissioned-extension-runtime",
-        mcpAppsAllowed: config !== "executable-code-trust" && config !== "permissioned-extension-runtime",
-        extensionRuntime: config === "permissioned-extension-runtime",
+        codeTrust: config !== "baseline" && trustingConfigs.has(config),
+        mcpAppsAllowed: !trustingConfigs.has(config),
+        extensionRuntime: hostingConfigs.has(config),
+        extensionReadConfinement: config === "read-confined-extension-runtime",
         path: (...segments) => sandbox.resolve(...segments),
       }
 
@@ -606,6 +622,7 @@ export namespace BenchHarness {
             security_auto_content: boolean
             security_auto_code: boolean
             security_auto_extension_runtime: boolean
+            security_auto_extension_unconfined_reads: boolean
             security_auto_tool_capabilities: Record<string, string[]>
           }
           const options: SecurityGate.Options = {

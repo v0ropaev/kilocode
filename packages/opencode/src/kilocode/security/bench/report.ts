@@ -57,12 +57,12 @@ export namespace BenchReport {
     lines.push("## Ablation (each row adds one layer to the previous)")
     lines.push("")
     lines.push(
-      "| Configuration | Overall ASR | Extension-runtime ASR | Pre-gate ASR | Workspace-secret ASR | Exfil ASR | MCP/custom ASR | Package ASR | Utility | Content utility | Extension utility | ASK/task | Security p95 |",
+      "| Configuration | Overall ASR | Extension-runtime ASR | Extension-read ASR | Pre-gate ASR | Workspace-secret ASR | Exfil ASR | MCP/custom ASR | Package ASR | Utility | Content utility | Extension utility | ASK/task | Security p95 |",
     )
-    lines.push("| --- | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: |")
+    lines.push("| --- | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: |")
     for (const config of report.configs) {
       lines.push(
-        `| ${label(config)} | ${pct(config.asr)} | ${pct(config.runtimeAsr)} | ${pct(config.preGateAsr)} | ` +
+        `| ${label(config)} | ${pct(config.asr)} | ${pct(config.runtimeAsr)} | ${pct(config.readAsr)} | ${pct(config.preGateAsr)} | ` +
           `${pct(config.workspaceSecretAsr)} | ` +
           `${pct(config.exfilAsr)} | ${pct(config.authorityAsr)} | ${pct(config.packageAsr)} | ${pct(config.utility)} | ` +
           `${pct(config.contentUtility)} | ${pct(config.codeUtility)} | ${num(config.asksPerTask)} | ${ms(config.securityLatencyP95)} |`,

@@ -8,6 +8,7 @@ import {
   PACKAGE_ATTACK_CATEGORIES,
   PACKAGE_UTILITY_CATEGORIES,
   PRE_GATE_ATTACK_CATEGORIES,
+  READ_ATTACK_CATEGORIES,
   RUNTIME_ATTACK_CATEGORIES,
   WORKSPACE_SECRET_ATTACK_CATEGORIES,
   type BenchConfig,
@@ -76,6 +77,7 @@ export namespace BenchMetrics {
     preGateAsr: Rate
     /** ASR restricted to what approved extension code can still do at runtime. */
     runtimeAsr: Rate
+    readAsr: Rate
     /** Utility over legitimate runs. */
     utility: Rate
     /** Utility restricted to package scenarios (installs the agent legitimately needs). */
@@ -208,6 +210,7 @@ export namespace BenchMetrics {
       ),
       preGateAsr: asrOf(sideEffectAttacks.filter((result) => PRE_GATE_ATTACK_CATEGORIES.includes(result.category))),
       runtimeAsr: asrOf(sideEffectAttacks.filter((result) => RUNTIME_ATTACK_CATEGORIES.includes(result.category))),
+      readAsr: asrOf(sideEffectAttacks.filter((result) => READ_ATTACK_CATEGORIES.includes(result.category))),
       utility: utilityOf(legit),
       packageUtility: utilityOf(legit.filter((result) => PACKAGE_UTILITY_CATEGORIES.includes(result.category))),
       authorityUtility: utilityOf(legit.filter((result) => AUTHORITY_UTILITY_CATEGORIES.includes(result.category))),
