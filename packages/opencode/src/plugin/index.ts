@@ -33,12 +33,10 @@ import { AnacondaDesktopPlugin } from "@/kilocode/anaconda-desktop/provider" // 
 import { registerAdapter } from "@/control-plane/adapters"
 import type { WorkspaceAdapter } from "@/control-plane/types"
 import { RuntimeFlags } from "@/effect/runtime-flags"
-import { CodeTrust } from "@/kilocode/security/code/trust" // kilocode_change
-import { ExtensionHost } from "@/kilocode/security/extension/host" // kilocode_change
-import { SecurityGate } from "@/kilocode/security/gate" // kilocode_change
 import { Global } from "@opencode-ai/core/global" // kilocode_change
 import path from "path" // kilocode_change
-import { SecurityFlag } from "@/kilocode/security/flag" // kilocode_change
+// kilocode_change - the security modules used below are imported lazily inside the layer; see the
+// comment at their import site for why importing them at module scope breaks the layer graph.
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { InstallationChannel } from "@opencode-ai/core/installation/version"
 
@@ -199,6 +197,20 @@ const layer = Layer.effect(
 
         // kilocode_change start - classify repository-controlled plugin code before
         // its module scope can run. Read from the global config only: a project must not trust itself.
+        //
+        // The four security modules are imported here rather than at module scope. The gate reuses the
+        // shell parser from `tool/shell.ts`, which reaches `tool/tool.ts` -> `agent/agent.ts` ->
+        // `provider/provider.ts`; provider declares `Plugin.node` among its layer dependencies, so a
+        // static import turns this module into a cycle and the dependency array observes an
+        // uninitialised node. Deferring the import to layer construction removes the edge entirely.
+        const [{ CodeTrust }, { ExtensionHost }, { SecurityGate }, { SecurityFlag }] = yield* Effect.promise(() =>
+          Promise.all([
+            import("@/kilocode/security/code/trust"),
+            import("@/kilocode/security/extension/host"),
+            import("@/kilocode/security/gate"),
+            import("@/kilocode/security/flag"),
+          ] as const),
+        )
         const globalConfig = yield* config.getGlobal().pipe(Effect.catch(() => Effect.succeed(undefined)))
         const codePolicy = CodeTrust.policy(globalConfig, yield* SecurityFlag.codeEnabled(config))
         // An approved *project* plugin is evaluated in a permissioned host process,
