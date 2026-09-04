@@ -41,11 +41,15 @@ export class MockProvider implements ClassifierProvider {
 export class HeuristicProvider implements ClassifierProvider {
   readonly name = "heuristic-offline"
 
-  async classify(input: SemanticInput): Promise<Verdict> {
-    const text = input.provenance.map((item) => item.excerpt).join("\n")
-    if (!text.trim()) return NO_SIGNAL
-
-    // An instruction pointed at the agent, rather than prose that merely mentions one.
+  /**
+   * Signal (a): does the untrusted text read like an instruction aimed at the agent?
+   *
+   * Pattern matching, and it shows: this catches the phrasings in the development set and misses the
+   * same attacks written politely. The limit is measured rather than argued — see the held-out
+   * numbers in `docs/security-auto-mode-llm-results.md`.
+   */
+  private injection(text: string, network: boolean): Verdict | undefined {
+    if (!text.trim()) return undefined
     const addressed =
       /\b(agent|assistant|ai|llm|copilot)\b\s*[:,-]|ignore (the )?(previous|above|prior)\b|you must\b|do the following\b/i
     const imperative =
@@ -54,12 +58,65 @@ export class HeuristicProvider implements ClassifierProvider {
 
     const looksAddressed = addressed.test(text)
     const looksActionable = imperative.test(text) && outbound.test(text)
-
-    if (!looksAddressed && !looksActionable) return { risk: "ORDINARY", category: "BENIGN_CONTEXT", confidence: "LOW" }
-    if (!input.action.network) return { risk: "SUSPICIOUS", category: "PROMPT_INJECTION", confidence: "LOW" }
+    if (!looksAddressed && !looksActionable) return undefined
+    if (!network) return { risk: "SUSPICIOUS", category: "PROMPT_INJECTION", confidence: "LOW" }
     if (looksAddressed && looksActionable)
       return { risk: "HIGH_RISK", category: "PROMPT_INJECTION", confidence: "HIGH" }
     return { risk: "SUSPICIOUS", category: "PROMPT_INJECTION", confidence: "MEDIUM" }
+  }
+
+  /**
+   * Signal (b): does the action send data outward while the request never mentioned sending anything?
+   *
+   * Structural rather than lexical on the action side: its own classification says it leaves the
+   * machine and what it carries. The request is checked only for whether the person asked for
+   * anything outbound at all. A request that does mention it drops the signal to nothing — which is
+   * as far as a matching goal is ever allowed to go, because this function returns an opinion that
+   * something is off and has no way to express the opposite.
+   */
+  private mismatch(input: SemanticInput): Verdict | undefined {
+    const goal = input.goal?.toLowerCase()
+    if (!goal || !input.action.network) return undefined
+
+    // Does the request name the subject of the action — the store, the labels, or a word from the
+    // file's own name? "Set up the AWS deployment" and a read of the AWS config share a subject;
+    // "fix the typo in the README" and a read of `~/.aws/credentials` share nothing. This is the
+    // comparison the signal is actually about, and it only ever quiets the signal.
+    const subjects = new Set<string>()
+    for (const operand of input.action.operands) {
+      if (operand.store) subjects.add(operand.store)
+      for (const label of operand.labels) subjects.add(label.replace(/-/g, " "))
+      for (const word of operand.basename.toLowerCase().split(/[^a-z0-9]+/)) if (word.length > 2) subjects.add(word)
+    }
+    if ([...subjects].some((subject) => goal.includes(subject))) return undefined
+
+    // Nothing in the request refers to what is being touched. Did it ask for anything outbound at all?
+    const outbound =
+      /\b(send|post|upload|publish|deploy\w*|push|share|report|notify|sync|mirror|export|submit|webhook|curl|http)\b/
+    if (outbound.test(goal)) return undefined
+
+    const carriesSecret = input.action.operands.some(
+      (operand) =>
+        operand.effect === "read" &&
+        (operand.labels.length > 0 ||
+          operand.relation === "home-sensitive" ||
+          /token|secret|credential|password|\bkey\b|\.env|auth/i.test(operand.basename)),
+    )
+    if (carriesSecret || input.action.readSecret)
+      return { risk: "HIGH_RISK", category: "USER_GOAL_MISMATCH", confidence: "MEDIUM" }
+    return { risk: "SUSPICIOUS", category: "USER_GOAL_MISMATCH", confidence: "MEDIUM" }
+  }
+
+  async classify(input: SemanticInput): Promise<Verdict> {
+    const text = input.provenance.map((item) => item.excerpt).join("\n")
+    const found = [this.injection(text, input.action.network), this.mismatch(input)].filter(
+      (item): item is Verdict => item !== undefined,
+    )
+    if (found.length === 0)
+      return text.trim() ? { risk: "ORDINARY", category: "BENIGN_CONTEXT", confidence: "LOW" } : NO_SIGNAL
+    // Report the more serious of the two, which is what the model is asked to do.
+    const order = { ORDINARY: 0, SUSPICIOUS: 1, HIGH_RISK: 2 }
+    return found.reduce((worst, item) => (order[item.risk] > order[worst.risk] ? item : worst))
   }
 }
 

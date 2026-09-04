@@ -614,6 +614,10 @@ export namespace BenchHarness {
       // Each run is a fresh session for the stateful egress layer; ids are already unique per run, this
       // also frees any state a previous run under the same id might have left.
       SecuritySessionState.reset(sessionID)
+      // The user's own request for this turn, when the scenario declares one. The product records it
+      // from the live turn; the benchmark records it here so goal-dependent signals run on the same
+      // path rather than being simulated.
+      if (scenario.goal) SecuritySessionState.recordGoal(sessionID, scenario.goal)
       human.approve = false
       human.approvals = 0
       hooks.before = scenarioInstance.pluginHook

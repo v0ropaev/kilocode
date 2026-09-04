@@ -30,7 +30,7 @@
 import { Effect } from "effect"
 import { Decision } from "../decision"
 import { SecuritySessionState } from "../state/store"
-import type { NormalizedAction, SecurityDecision, SecurityEvidence } from "../types"
+import type { NormalizedAction, NormalizedPath, SecurityDecision, SecurityEvidence } from "../types"
 import type { ClassifierProvider } from "./provider"
 import { NO_SIGNAL, type SemanticInput, type Verdict } from "./schema"
 
@@ -99,6 +99,21 @@ export namespace SemanticEvidence {
     return true
   }
 
+  /**
+   * Which credential store a sensitive path belongs to, as the word a person would use: `aws`, `ssh`,
+   * `kube`. Derived from the single dot-directory the path sits under, so it is a class and never a
+   * location — `~/.aws/credentials` yields `aws` and nothing else.
+   *
+   * This is what makes "did the request mention what this action touches?" answerable. Without it the
+   * only thing the layer knows about `~/.aws/config` is that its base name is `config`, and a request
+   * saying "set up the AWS deployment" looks unrelated to it.
+   */
+  function storeOf(target: NormalizedPath): string | undefined {
+    if (target.relation !== "home-sensitive") return undefined
+    const segment = target.canonical.split("/").find((part) => part.startsWith(".") && part.length > 1)
+    return segment ? segment.slice(1).toLowerCase() : undefined
+  }
+
   /** Assemble what the model is shown. Structure and bounded excerpts; never a command line. */
   export function summarize(action: NormalizedAction, sessionID: string): SemanticInput | undefined {
     const readSecret = SecuritySessionState.hasSecretContext(sessionID)
@@ -129,6 +144,7 @@ export namespace SemanticEvidence {
           relation: operand.path.relation,
           labels: operand.path.labels,
           effect: operand.effect,
+          ...(storeOf(operand.path) ? { store: storeOf(operand.path)! } : {}),
         })),
       },
       provenance,

@@ -95,6 +95,7 @@ export type ScenarioCategory =
   | "attack-extension-runtime"
   | "attack-extension-read"
   | "attack-workspace-secret"
+  | "attack-goal-mismatch"
   | "attack-device"
 
 /** Categories that make up the package-specific ASR. */
@@ -227,6 +228,14 @@ export interface Scenario {
   expectedProtected?: "deny" | "hard-ask" | "soft-ask-or-allow"
   /** Cross-links a paired scenario (agent-initiated ↔ user-requested), for the intent analysis. */
   pairedWith?: string
+  /**
+   * What the user asked for this turn, in their own words. Recorded into session state before the
+   * trajectory runs, exactly as the product records it from a real turn.
+   *
+   * Evidence about intent, never authority: a scenario whose goal names the dangerous action is still
+   * adjudicated by the same rules, which is what `atk-ssh-write-user-requested` exists to demonstrate.
+   */
+  goal?: string
   /** The layer the scenario primarily exercises (for the per-layer breakdown). */
   layer?: "deterministic" | "packages" | "egress" | "tools" | "content" | "code" | "runtime" | "pre-gate" | "residual"
   build(ctx: ScenarioContext): Effect.Effect<ScenarioInstance>
