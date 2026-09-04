@@ -20,7 +20,8 @@ import type { SecurityGate } from "@/kilocode/security/gate"
  * - `package-security`: v1 + package provenance preflight (the package layer);
  * - `stateful-egress`: v1 + packages + stateful secret-egress protection (the egress layer) — i.e. all of v2;
  * - `delegated-tool-security`: v2 + delegated-authority classification of MCP / custom tools (v3);
- * - `content-secret-detection`: v3 + secret classification of ordinary workspace content (v4).
+ * - `content-secret-detection`: v3 + secret classification of ordinary workspace content (v4);
+ * - `executable-code-trust`: v4 + trust boundary for repository-controlled executable code (v5).
  */
 export type BenchConfig =
   | "baseline"
@@ -29,6 +30,7 @@ export type BenchConfig =
   | "stateful-egress"
   | "delegated-tool-security"
   | "content-secret-detection"
+  | "executable-code-trust"
 
 export const BENCH_CONFIGS: readonly BenchConfig[] = [
   "baseline",
@@ -37,6 +39,7 @@ export const BENCH_CONFIGS: readonly BenchConfig[] = [
   "stateful-egress",
   "delegated-tool-security",
   "content-secret-detection",
+  "executable-code-trust",
 ]
 
 export const CONFIG_LABELS: Record<BenchConfig, string> = {
@@ -46,6 +49,7 @@ export const CONFIG_LABELS: Record<BenchConfig, string> = {
   "stateful-egress": "+ Stateful Egress",
   "delegated-tool-security": "+ Delegated Tool Security",
   "content-secret-detection": "+ Content Secret Detection",
+  "executable-code-trust": "+ Executable Code Trust",
 }
 
 export type ScenarioCategory =
@@ -59,6 +63,7 @@ export type ScenarioCategory =
   | "utility-sensitive"
   | "utility-mcp"
   | "utility-content"
+  | "utility-code"
   | "attack-destructive-filesystem"
   | "attack-sensitive-path"
   | "attack-shell-indirection"
@@ -90,6 +95,8 @@ export const PACKAGE_UTILITY_CATEGORIES: readonly ScenarioCategory[] = ["utility
 export const AUTHORITY_UTILITY_CATEGORIES: readonly ScenarioCategory[] = ["utility-mcp"]
 /** Categories that make up the content-classification utility rate (the false-positive surface). */
 export const CONTENT_UTILITY_CATEGORIES: readonly ScenarioCategory[] = ["utility-content"]
+/** Categories that make up the executable-code utility rate (plugins / custom tools that must load). */
+export const CODE_UTILITY_CATEGORIES: readonly ScenarioCategory[] = ["utility-code"]
 
 /**
  * Who wants the dangerous action. The engine is intent-agnostic today; the field exists so paired
@@ -141,6 +148,13 @@ export interface ScenarioContext {
   binDir: string
   /** Kilo's global config directory (a disposable temp dir here). The engine treats it as protected. */
   kiloConfigDir: string
+  /**
+   * Whether the executable-code trust boundary is active for this run. Pre-gate
+   * scenarios use it to run the loaders' real sequence for the configuration under test.
+   */
+  codeTrust: boolean
+  /** Whether widget-initiated MCP Apps calls are permitted for this run. */
+  mcpAppsAllowed: boolean
   /** Build an absolute path guaranteed to sit inside the sandbox (throws otherwise). */
   path(...segments: string[]): string
 }
@@ -185,7 +199,7 @@ export interface Scenario {
   /** Cross-links a paired scenario (agent-initiated ↔ user-requested), for the intent analysis. */
   pairedWith?: string
   /** The layer the scenario primarily exercises (for the per-layer breakdown). */
-  layer?: "deterministic" | "packages" | "egress" | "tools" | "content" | "pre-gate" | "residual"
+  layer?: "deterministic" | "packages" | "egress" | "tools" | "content" | "code" | "pre-gate" | "residual"
   build(ctx: ScenarioContext): Effect.Effect<ScenarioInstance>
 }
 

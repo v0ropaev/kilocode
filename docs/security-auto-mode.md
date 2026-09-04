@@ -13,7 +13,7 @@ Code map verified against commit `f062b0737eb6969644ab3fea7b391b8049401e4a` (202
 - Global config (`~/.config/kilo/kilo.json` or `opencode.json`): `{ "experimental": { "security_auto": true } }`
 - or the environment variable `KILO_SECURITY_AUTO=1` (`0` / `false` forces it off).
 
-Four additional evaluation layers are on whenever the mode is on and can be switched off
+Five additional evaluation layers are on whenever the mode is on and can be switched off
 individually, global config or environment only:
 
 | Layer | Config key | Env | Default |
@@ -22,6 +22,7 @@ individually, global config or environment only:
 | Stateful secret-egress protection | `experimental.security_auto_egress` | `KILO_SECURITY_AUTO_EGRESS` | on |
 | Delegated-authority classification | `experimental.security_auto_tools` | `KILO_SECURITY_AUTO_TOOLS` | on |
 | Workspace secret-content classification | `experimental.security_auto_content` | `KILO_SECURITY_AUTO_CONTENT` | on |
+| Executable project-code trust boundary | `experimental.security_auto_code` | `KILO_SECURITY_AUTO_CODE` | on |
 
 The delegated-authority layer also reads the capabilities you vouch for, per tool id or glob:
 
@@ -288,6 +289,53 @@ layer and is inert without it.
   lives, and the session reacts.* It does not decode (base64/hex), does not reassemble values split
   across lines, and does not call a bare opaque string a secret on entropy alone.
 
+## Executable project code (`security_auto_code`)
+
+The four layers above adjudicate *tool calls*. This one adjudicates something that happens earlier and
+cannot be undone: the moment Kilo runs `import()` on a file it discovered.
+`packages/opencode/src/kilocode/security/code/trust.ts`.
+
+A `.kilocode/tool/*.ts` file and a project-declared plugin execute their module scope at that instant —
+before any tool exists to gate, before the sandbox, before the model has done anything. Opening a
+session in a cloned repository is enough. The principle is **`discovery != execution`**: the candidate
+is discovered, resolved and classified, and only then may it be imported.
+
+- **Where the decision sits.** For custom tools, between `Glob.scanSync` and
+  `import(pathToFileURL(match).href)` in the tool registry. For plugins, between `resolve()` and
+  `load()` in the plugin loader — the loader gained one optional `trust` callback and nothing else, so
+  the ordering is visible in the diff rather than implied.
+- **Origins** are structural, from the path and from the scope of the config entry that declared the
+  candidate: `builtin`; `trusted-config` (inside the user's global config directory, or declared by the
+  user's global config — symlinks resolved); `workspace` (repository-controlled). A `local` scope may
+  only *lower* trust, so a project config declaring a dependency that resolves into a shared cache is
+  still project-controlled.
+- **Approval is by content, not by path.** `experimental.security_auto_code_trust` holds SHA-256
+  digests the user vouched for, in the global config only. A path-only approval would let the file be
+  swapped afterwards; a content-keyed one survives a rename and is revoked by an edit. Nothing about
+  the source is stored — only the digest, and only by the user.
+- **Nothing the candidate says about itself is read**, because reading it would require the very import
+  this boundary prevents: not its name, not its exports, not a `trusted: true` field, and not the
+  project's own config.
+- **TOCTOU.** The digest is verified a second time immediately before the answer is given, so a file
+  swapped between the approval check and the import is caught. The window between that final check and
+  the runtime's own read of the file is *not* closed — dynamic import takes a path, not bytes — and is
+  recorded as a residual rather than claimed away.
+- **Blocked candidates are surfaced**, with their digest and the exact line a human needs to approve
+  them. Approval is a user action in user-owned configuration; the agent and the repository cannot
+  perform it.
+- Honest guarantee: *repository-controlled executable code does not run during discovery or loading
+  before a trust decision made above the project level.* It does not sandbox approved code, does not
+  govern what an approved module imports transitively, and does not constrain what an approved
+  plugin's hooks do afterwards.
+
+### MCP Apps HTTP route
+
+The widget-initiated `POST /experimental/mcp/call-tool` route reaches a connected server with no
+session, no permission ask and no security engine. It has no session to attach, and inventing one
+would be worse than the hole, so with Security Auto on the route now **fails safe**: it is refused
+unless the user explicitly opts back in with `experimental.security_auto_mcp_apps` in the global
+config. With the mode off, nothing changes.
+
 ## Structured safe continuation
 
 A DENY inside a tool becomes a completed tool result titled "Blocked by security policy" whose
@@ -317,6 +365,10 @@ catches repeated identical attempts.
   read never taints; benign-but-random content (lockfiles, hashes, UUIDs, placeholders) does not; raw
   values never reach state, snapshots or logs — only salted digests and a category
   (`test/kilocode/security/content.test.ts`);
+- an untrusted project tool file or plugin is discovered but never imported, so its module scope
+  does not run; approval is keyed by content, survives a rename, and is revoked by an edit; neither the
+  module's own exports nor the project config can grant it; the layer off restores the previous loading
+  semantics exactly (`test/kilocode/security/code.test.ts`, `pregate.test.ts`);
 - an unknown tool is never a silent ALLOW; a DENY means neither the custom-tool body nor the
   remote MCP call runs; the envelope-ask sets are derived from the capability table and still match the
   base contract exactly; a tool cannot raise its own trust through its id, description, annotations or
@@ -375,6 +427,17 @@ non-path shape. Confirmed residuals: encoded/hex values, values split across lin
 token with no credential marker anywhere near it — the last one deliberately, because calling it a
 secret means trusting entropy alone.
 
+The code-trust boundary was reviewed against: a plain project file, an edit after approval, the same
+content in another repository, a traversal path, an uppercase digest in the approval list, a directory
+named like a module, an empty file, a file past the fingerprint cap, a path merely resembling the
+trusted directory, a `local` scope claim, a symlink whose target is swapped afterwards, a rename, a
+`file://` form, and an alternate extension. One real defect was found and fixed: origin classification
+compared lexical paths, so a config directory reached through a symlink (every macOS temp path) was
+misclassified as workspace — it now compares resolved paths. Deliberate properties, not defects:
+approving content approves those exact bytes anywhere, so a rename keeps working and an identical file
+in another repository is also approved; an unreadable or over-large candidate is refused rather than
+assumed safe.
+
 ## Known limitations (not guaranteed by this slice)
 
 - Sandbox off is materially weaker: allowed workspace scripts (`npm run x`, `make`, `python script.py`)
@@ -388,18 +451,20 @@ secret means trusting entropy alone.
   send; a tool that reads and transmits internally, with the bytes never crossing either boundary, is
   out of reach. Classification is bounded (512 KB of content, 1 MB per file inspected at decision
   time), so a secret past the cap is missed.
-- (v3 residuals) **Load-time execution is not governed at all**: `.kilocode/tool/*.ts` and project
-  plugins are `import()`ed while the registry/plugin state is built — before any tool call, ask or
-  sandbox — so opening a session in a hostile repository is already arbitrary code execution in the
-  host process. The v3 layer governs tool *invocation*, not module loading; this is the strongest
-  residual risk in the class and needs a separate trust decision for project-provided code.
-  Plugin hooks (`tool.execute.before/after`, `config`, `agent.transform`) likewise run in-process
-  outside the gate, and a plugin holding the local SDK client can answer a pending prompt as if it were
-  interactive. `McpApps.callTool` (experimental MCP Apps) calls any connected server straight from an
-  HTTP handler with no session, ask or gate. A declared `process` tool is hard-asked but its command is
-  never inspected. An MCP server can also swap its tool definitions between steps
-  (`notifications/tools/list_changed`) and its instructions/descriptions flow into the prompt unfiltered —
-  prompt injection through MCP text is explicitly out of scope here.
+- (v5 residuals) The boundary governs **loading, not behaviour**. Approved code runs in the main Kilo
+  process with full host authority: the tool sandbox wraps tool *execution*, not module evaluation, so
+  an approved module's top level is unsandboxed. It also governs **discovered files, not their
+  transitive imports** — an approved module that imports a sibling at its top level runs that sibling's
+  code under the approval (measured: `atk-pregate-nested-import`). Once a plugin is allowed to load,
+  its lifecycle hooks still run outside the tool gate (measured: `atk-pregate-plugin-hook`), and a
+  plugin holding the local SDK client can still answer a pending prompt as if it were interactive,
+  because `interactive` is an unverified boolean on the reply payload rather than a server-issued
+  attestation. The TOCTOU window between the final digest check and the runtime's own read is open.
+  A file larger than 8 MB cannot be fingerprinted and is therefore never loaded.
+- (delegated authority) A declared `process` tool is hard-asked but its command is never inspected. An MCP
+  server can swap its tool definitions between steps (`notifications/tools/list_changed`) and its
+  instructions/descriptions flow into the prompt unfiltered — prompt injection through MCP text is
+  explicitly out of scope here.
 - (egress) The egress layer sees only controlled built-in flows: an **opaque subprocess** that
   reads a secret and sends it itself (`python upload.py secret`, an unknown outbound tool) is not
   contained by static state — the OS sandbox is the control there; **encoded/transformed** values are
@@ -428,5 +493,6 @@ secret means trusting entropy alone.
   process that never created it (server restart, direct prompt to a subagent id) resolves to itself and
   starts with empty secret context; a durable ancestry query would be needed to close that.
 - The `experimental.security_auto`, `security_auto_packages`, `security_auto_egress`,
-  `security_auto_tools` and `security_auto_tool_capabilities` keys must be mirrored in the cloud config
-  schema (`apps/web/src/app/config.json/extras.ts`).
+  `security_auto_tools`, `security_auto_content`, `security_auto_code`, `security_auto_mcp_apps`,
+  `security_auto_tool_capabilities` and `security_auto_code_trust` keys must be mirrored in the cloud
+  config schema (`apps/web/src/app/config.json/extras.ts`).

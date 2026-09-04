@@ -148,6 +148,7 @@ describe("metric calculations", () => {
       "stateful-egress",
       "delegated-tool-security",
       "content-secret-detection",
+      "executable-code-trust",
     ])
     expect(report.configs.find((c) => c.config === "stateful-egress")!.asr.rate).toBeNull()
   })
@@ -233,6 +234,8 @@ describe("isolation guard", () => {
           binDir: sandbox.binDir,
           kiloConfigDir: Global.Path.config,
           collector: { url: collector.url, received: () => false },
+          codeTrust: false,
+          mcpAppsAllowed: true,
           path: (...segments: string[]) => sandbox.resolve(...segments),
         }
         const instance = await Effect.runPromise(scenario.build(ctx))

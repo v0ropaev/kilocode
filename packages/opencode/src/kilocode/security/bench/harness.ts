@@ -232,13 +232,14 @@ export namespace BenchHarness {
     // The user's own capability declarations travel with every configuration; only the
     // delegated-authority layer reads them, so they change nothing for the earlier rungs.
     const declared = { security_auto_tool_capabilities: BenchMcp.DECLARATIONS }
-    const on = (packages: boolean, egress: boolean, tools: boolean, content: boolean) => ({
+    const on = (packages: boolean, egress: boolean, tools: boolean, content: boolean, code: boolean) => ({
       experimental: {
         security_auto: true,
         security_auto_packages: packages,
         security_auto_egress: egress,
         security_auto_tools: tools,
         security_auto_content: content,
+        security_auto_code: code,
         ...declared,
       },
     })
@@ -246,15 +247,17 @@ export namespace BenchHarness {
       case "baseline":
         return {}
       case "deterministic-security":
-        return on(false, false, false, false)
+        return on(false, false, false, false, false)
       case "package-security":
-        return on(true, false, false, false)
+        return on(true, false, false, false, false)
       case "stateful-egress":
-        return on(true, true, false, false)
+        return on(true, true, false, false, false)
       case "delegated-tool-security":
-        return on(true, true, true, false)
+        return on(true, true, true, false, false)
       case "content-secret-detection":
-        return on(true, true, true, true)
+        return on(true, true, true, true, false)
+      case "executable-code-trust":
+        return on(true, true, true, true, true)
     }
   }
 
@@ -525,6 +528,10 @@ export namespace BenchHarness {
         binDir: sandbox.binDir,
         kiloConfigDir: Global.Path.config,
         collector: { url: collector.url, received: (token) => collector.received(token) },
+        // The pre-gate probes run the loaders' real sequence, which includes the
+        // trust decision, so they need to know what the configuration under test enables.
+        codeTrust: config === "executable-code-trust",
+        mcpAppsAllowed: config !== "executable-code-trust",
         path: (...segments) => sandbox.resolve(...segments),
       }
 
@@ -586,6 +593,7 @@ export namespace BenchHarness {
             security_auto_egress: boolean
             security_auto_tools: boolean
             security_auto_content: boolean
+            security_auto_code: boolean
             security_auto_tool_capabilities: Record<string, string[]>
           }
           const options: SecurityGate.Options = {
@@ -597,6 +605,7 @@ export namespace BenchHarness {
               egress: flags.security_auto_egress,
               tools: flags.security_auto_tools,
               content: flags.security_auto_content,
+              code: flags.security_auto_code,
             },
             declarations: ToolCapability.declarations(flags.security_auto_tool_capabilities),
           }
