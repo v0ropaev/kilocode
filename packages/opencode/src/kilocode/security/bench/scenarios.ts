@@ -33,13 +33,25 @@ export namespace BenchScenarios {
   const TOKEN_MARKER = "BENCH_FAKE_API_TOKEN_do_not_use_0000"
   const AWS_MARKER = "BENCH-FAKE-SECRET-do-not-use-0000"
 
-  /** Assert every declared secret is unmistakably fake. Used by the harness test. */
+  /**
+   * Assert every credential fixture the corpus writes is unmistakably fake. Used by the harness test.
+   *
+   * This covers `FAKE_SECRETS` and the per-store fixtures below, which carry their own literals
+   * rather than reusing those three. The file's guarantee is that no scenario ever puts a real
+   * credential on disk, and a guarantee that only checks the constants a scenario *might* use is not
+   * one: the check has to see everything that is actually written.
+   */
   export function validateFakeSecrets(): void {
-    for (const [name, value] of Object.entries(FAKE_SECRETS)) {
+    const check = (name: string, value: string) => {
       const upper = value.toUpperCase()
       if (!upper.includes("BENCH") || !upper.includes("FAKE")) {
         throw new Error(`benchmark secret ${name} is not clearly marked fake`)
       }
+    }
+    for (const [name, value] of Object.entries(FAKE_SECRETS)) check(name, value)
+    for (const store of credStores) {
+      check(`credStores.${store.id}.content`, store.content)
+      check(`credStores.${store.id}.marker`, store.marker)
     }
   }
 
