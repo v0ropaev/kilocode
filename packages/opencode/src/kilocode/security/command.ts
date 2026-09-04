@@ -2128,7 +2128,7 @@ export namespace CommandSemantics {
           const at = arg.lastIndexOf("@")
           return at >= 0 ? arg.slice(at + 1) : arg
         })
-        .filter((value, i) => upload[i]!.includes("@") || /^[./~]/.test(value))
+        .filter((value, i) => upload[i].includes("@") || /^[./~]/.test(value))
       return {
         ...EMPTY,
         effect: out.length > 0 ? "write" : undefined,
