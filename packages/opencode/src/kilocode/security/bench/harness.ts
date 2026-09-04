@@ -228,14 +228,30 @@ export namespace BenchHarness {
     }),
   )
 
+  /**
+   * The rung a configuration inherits its product behaviour from.
+   *
+   * `llm-advisory` is the shipped top rung plus one opt-in flag: everything else about it — the code
+   * trust boundary, the extension host, read confinement — must be identical, or the row stops being
+   * a measurement of the advisory and becomes a measurement of a different product. Resolving that
+   * here means the answer is given once, instead of in each of the name lists below (which is exactly
+   * where it was first got wrong).
+   */
+  function productRung(config: BenchConfig): BenchConfig {
+    return config === "llm-advisory" ? "read-confined-extension-runtime" : config
+  }
+
   /** Configurations in which the executable-code trust boundary is active. */
-  const trustingConfigs = new Set<BenchConfig>([
+  const trusting = new Set<BenchConfig>([
     "executable-code-trust",
     "permissioned-extension-runtime",
     "read-confined-extension-runtime",
   ])
   /** Configurations in which an approved workspace extension is evaluated in the permissioned host. */
-  const hostingConfigs = new Set<BenchConfig>(["permissioned-extension-runtime", "read-confined-extension-runtime"])
+  const hosting = new Set<BenchConfig>(["permissioned-extension-runtime", "read-confined-extension-runtime"])
+
+  const trustingConfigs = { has: (config: BenchConfig) => trusting.has(productRung(config)) }
+  const hostingConfigs = { has: (config: BenchConfig) => hosting.has(productRung(config)) }
 
   /** The single knob: what the global config says for each configuration of the ablation ladder. */
   export function flagsFor(config: BenchConfig) {
@@ -566,7 +582,7 @@ export namespace BenchHarness {
         codeTrust: config !== "baseline" && trustingConfigs.has(config),
         mcpAppsAllowed: !trustingConfigs.has(config),
         extensionRuntime: hostingConfigs.has(config),
-        extensionReadConfinement: config === "read-confined-extension-runtime",
+        extensionReadConfinement: productRung(config) === "read-confined-extension-runtime",
         path: (...segments) => sandbox.resolve(...segments),
       }
 
