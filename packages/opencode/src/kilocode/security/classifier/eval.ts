@@ -106,7 +106,7 @@ async function main() {
 
   // ---- Report ----
   const L = (s: string) => console.log(s)
-  L("# LLM layers — offline ablation (HeuristicProvider stand-in)\n")
+  L(`# LLM layers — ablation (provider: ${provider.name})\n`)
   L("## Context Checker (untrusted-input probe)")
   L(`| Metric | Value |`)
   L(`| --- | --- |`)
