@@ -38,6 +38,7 @@ import * as Tool from "@/tool/tool"
 import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
 import { Schema } from "effect"
+import { ClassifierAdvisory } from "@/kilocode/security/classifier/layers"
 import { SecurityGate } from "@/kilocode/security/gate"
 import { SecurityKeys } from "@/kilocode/security/keys"
 import { PackageMetadata } from "@/kilocode/security/package/metadata"
@@ -251,6 +252,10 @@ export namespace BenchHarness {
       // The rung below read confinement is the runtime as it was: hosted, but reading whatever the
       // user can. The user-facing flag that accepts that is the one knob these two rows differ by.
       unconfinedReads = true,
+      // The advisory is the one layer that is off unless a rung asks for it: every configuration
+      // below the last must be byte-for-byte the shipped behaviour, model calls included (there are
+      // none). Reading `false` here is what makes "the ladder measures the product" true.
+      classifier = false,
     ) => ({
       experimental: {
         security_auto: true,
@@ -261,6 +266,7 @@ export namespace BenchHarness {
         security_auto_code: code,
         security_auto_extension_runtime: runtime,
         security_auto_extension_unconfined_reads: runtime ? unconfinedReads : false,
+        security_auto_classifier: classifier,
         ...declared,
       },
     })
@@ -283,6 +289,8 @@ export namespace BenchHarness {
         return on(true, true, true, true, true, true)
       case "read-confined-extension-runtime":
         return on(true, true, true, true, true, true, false)
+      case "llm-advisory":
+        return on(true, true, true, true, true, true, false, true)
     }
   }
 
@@ -623,6 +631,7 @@ export namespace BenchHarness {
             security_auto_code: boolean
             security_auto_extension_runtime: boolean
             security_auto_extension_unconfined_reads: boolean
+            security_auto_classifier: boolean
             security_auto_tool_capabilities: Record<string, string[]>
           }
           const options: SecurityGate.Options = {
@@ -636,6 +645,7 @@ export namespace BenchHarness {
               content: flags.security_auto_content,
               code: flags.security_auto_code,
               runtime: flags.security_auto_extension_runtime,
+              classifier: flags.security_auto_classifier,
             },
             declarations: ToolCapability.declarations(flags.security_auto_tool_capabilities),
           }
@@ -741,6 +751,17 @@ export namespace BenchHarness {
     collector: BenchCollector.Handle
   }
 
+  /**
+   * Advisory cost per configuration. Kept next to the results rather than derived from them: a call
+   * that timed out or failed leaves no trace in a decision, and "the model was asked and said
+   * nothing" has to be distinguishable from "the model was never asked".
+   */
+  const classifierCost = new Map<BenchConfig, ClassifierAdvisory.Stats>()
+
+  export function classifierStats(): ReadonlyMap<BenchConfig, ClassifierAdvisory.Stats> {
+    return classifierCost
+  }
+
   /** Run every scenario × run for one configuration, sharing a single service/registry build. */
   export function runSuite(input: SuiteInput & { config: BenchConfig }) {
     const jobs: RunOneInput[] = []
@@ -756,7 +777,11 @@ export namespace BenchHarness {
       }
     }
     // Sequential: fair latency, and no races on the shared collector / PATH / decision observer.
-    return Effect.forEach(jobs, runOne, { concurrency: 1 }).pipe(Effect.provide(registryLayer(input.config)))
+    ClassifierAdvisory.reset()
+    return Effect.forEach(jobs, runOne, { concurrency: 1 }).pipe(
+      Effect.provide(registryLayer(input.config)),
+      Effect.tap(() => Effect.sync(() => classifierCost.set(input.config, ClassifierAdvisory.snapshot()))),
+    )
   }
 
   /** Run the configurations in ladder order (default: all four) on the same sandbox. */

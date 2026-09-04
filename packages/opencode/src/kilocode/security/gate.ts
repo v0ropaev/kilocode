@@ -23,6 +23,8 @@ import { PackageRiskEvaluator } from "./package/evaluator"
 import { SecuritySessionState } from "./state/store"
 import { EgressGuard } from "./state/egress"
 import { SecretContent } from "./state/content"
+import { ClassifierAdvisory } from "./classifier/layers"
+import { defaultProvider as classifierProvider } from "./classifier/provider"
 import { ToolAuthority } from "./tool/authority"
 import { ToolCapability } from "./tool/capability"
 import type {
@@ -104,7 +106,7 @@ export namespace SecurityGate {
     const enabled = yield* SecurityFlag.enabled(input.config)
     const layers: SecurityFlag.Layers = enabled
       ? yield* SecurityFlag.layers(input.config)
-      : { packages: false, egress: false, tools: false, content: false, code: false, runtime: false }
+      : { packages: false, egress: false, tools: false, content: false, code: false, runtime: false, classifier: false }
     const declarations = enabled && layers.tools ? yield* SecurityFlag.declarations(input.config) : []
     const result: Options = { enabled, sandboxed: input.sandboxed, workspace: input.workspace, layers, declarations }
     return result
@@ -361,6 +363,7 @@ export namespace SecurityGate {
       content: false,
       code: false,
       runtime: false,
+      classifier: false,
     }
     const callID = input.request.tool?.callID
     const started = performance.now()
@@ -396,6 +399,17 @@ export namespace SecurityGate {
           })
           if (callID !== undefined) SecuritySessionState.recordPending(input.sessionID, callID, authority.pending)
           decision = SecurityEngine.extend(decision, authority.evidence)
+        }
+        if (layers.classifier && ClassifierAdvisory.considers(decision, action)) {
+          // Last, and only for what the deterministic layers left unsettled. It travels through the
+          // same monotone reducer as every other layer, which is what makes "the model cannot open
+          // anything up" a property of the fold rather than a promise in a comment.
+          const advisory = yield* ClassifierAdvisory.assess({
+            provider: classifierProvider(),
+            summary: ClassifierAdvisory.summarize(action, SecuritySessionState.hasSecretContext(input.sessionID)),
+            timeoutMs: SecurityFlag.classifierTimeoutMs(),
+          })
+          decision = SecurityEngine.extend(decision, advisory)
         }
         return decision
       }),
