@@ -30,6 +30,11 @@ contribution of every layer is measurable on its own:
 | `executable-code-trust` | `+ security_auto_code` | trust boundary for repository-controlled executable code |
 | `permissioned-extension-runtime` | `+ security_auto_extension_runtime` | permissioned host process for approved extensions, reads left open |
 | `read-confined-extension-runtime` | `− security_auto_extension_unconfined_reads` | that host's ambient reads confined to the extension's working set |
+| `llm-advisory` | `+ security_auto_classifier` | an opt-in advisory model review of outbound actions the deterministic layers left unsettled |
+
+The last rung is not part of Security Auto Mode as shipped: the flag is off by default, and the rung
+exists so the cost of turning it on can be read directly against the row above it, which is identical
+in every other respect. See `security-auto-mode-llm-layers.md`.
 
 `--configs baseline,deterministic-security,package-security` runs a subset; the no-arg run does the whole ladder.
 `--scenario a,b*,c` selects a subset by id or prefix.

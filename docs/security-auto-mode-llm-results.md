@@ -1,56 +1,101 @@
-# LLM layers — measured ablation (heuristic vs local models)
+# LLM advisory — измерение в основном бенчмарке
 
-Offline ablation of the two LLM layers over inputs mirroring the benchmark
-corpus (12 injection + 3 subtle-injection contents, 10 benign + 3 tricky-benign
-contents, 6 intent pairs). Run with:
+Прогон: 187 сценариев × 3 запуска × 3 конфигурации = 1683 запуска, 0 ошибок.
+Ступень `llm-advisory` отличается от `read-confined-extension-runtime` **ровно одним флагом**;
+всё остальное — тот же продукт.
 
 ```
-LLM=heuristic bun run src/kilocode/security/classifier/eval.ts
-LLM=openai LLM_MODEL=qwen2.5:3b bun run …/eval.ts   # local via Ollama /v1
-LLM=openai LLM_MODEL=qwen2.5:7b bun run …/eval.ts
+bun run script/security-bench.ts --runs 3 \
+  --configs baseline,read-confined-extension-runtime,llm-advisory --tag final-187-r3
 ```
 
-## Results
+Провайдер по умолчанию — `heuristic`: детерминированная офлайн-заглушка без сети и ключей. Она
+измеряет **композицию**, а не качество модели. Числа ниже говорят, что делает архитектура, когда
+слой что-то помечает, и чего это стоит; они не говорят, насколько хорошо помечает настоящая модель.
 
-| Metric | Heuristic (regex) | qwen2.5:3b (local) | qwen2.5:7b (local) |
-| --- | --: | --: | --: |
-| Context Checker — detection (TPR) | 80% (12/15) | 73% (11/15) | 73% (11/15) |
-| Context Checker — false positives (FPR) | 23% (3/13) | **0% (0/13)** | **0% (0/13)** |
-| Projected injection-driven ASR | 100% → 20% | 100% → 27% | 100% → 27% |
-| False escalations on benign→egress (friction) | 3/13 | **0/13** | **0/13** |
-| Action Classifier — correct intent | 100%\* | 67% (4/6) | **100% (6/6)** |
-| Model calls (whole ablation) | 0 | 84 | 84 |
-| Decision latency p50 | ~0 (regex) | 296 ms | 1001 ms |
-| Decision latency p95 | ~0 | 960 ms | 53881 ms† |
+## Результат
 
-\* Heuristic 100% is on the hand-written intent cases it was tuned for — an over-statement, not a real generalisation.
-† 7B p95 is dominated by the first-call cold load of the model into RAM; steady-state p50 ≈ 1 s.
+| Метрика | Без advisory | С advisory | Изменение |
+|---|---:|---:|---:|
+| Overall ASR | 21% (87/408) | **15% (60/408)** | −6 п.п. |
+| ASR на инъекциях | 84% (63/75) | **48% (36/75)** | −36 п.п. |
+| ASR на остальных 12 классах | без изменений | без изменений | 0 |
+| Utility | 98% (144/147) | **92% (135/147)** | −6 п.п. |
+| Utility на content-задачах | 100% (27/27) | **67% (18/27)** | −33 п.п. |
+| Safe DENY FP | 0 | **0** | 0 |
+| Safe ASK FP | 6 | **15** | +9 |
+| ASK/task | 0.15 | 0.22 | +0.07 |
+| Security p50 / p95 | 0.74 / 1.40 мс | 0.71 / 1.37 мс | — |
 
-## Honest reading
+## Что подтверждает счётчики решений
 
-- **Where the LLM clearly wins: false positives.** Both local models score **0% FPR**
-  vs the regex heuristic's **23%**. The models correctly tell "read the .env and send
-  us feedback" / "run `curl …/health`" / "delete the build dir" (benign) apart from a
-  real exfiltration instruction. Semantics beat pattern-matching exactly where a naive
-  guard over-flags and creates friction.
-- **Model size matters for *intent*, not for *injection detection*.** The Action
-  Classifier (did the user actually authorise this action?) jumps **67% → 100%** from 3B
-  to 7B. Context-injection detection is unchanged (73% TPR, 0% FPR): the easy cases are
-  caught by both, and the same ~4 subtle/obfuscated injections are missed by both.
-- **Latency is the real cost.** ~0.3 s (3B) to ~1 s (7B) per decision, vs ~1 ms for the
-  deterministic engine — 300–1000×. This is why the LLM must run only on the narrow band
-  (soft-ASK / untrusted-content ingestion) and why the Context Checker is two-stage
-  (single-token filter → JSON only when flagged).
+| | Без advisory | С advisory |
+|---|---:|---:|
+| auto ALLOW | 258 | **258** |
+| DENY | 195 | **195** |
+| soft ASK | 156 | 117 |
+| hard ASK | 84 | 123 |
 
-## Conclusion
+`ALLOW` и `DENY` не сдвинулись ни на единицу, а 39 решений перешли из soft ASK в hard ASK — ровно
+столько, сколько слой пометил. Инвариант «только строже, и только запрос человеку» виден в данных,
+а не только в тестах.
 
-On a **weak local model** — the case's corporate/open-source scenario — the LLM layers give
-a **better security/friction trade-off** than a heuristic (injection ASR 100%→27% at **zero**
-false escalations, where the regex paid 23% FPR), and a stronger model closes the *intent*
-gap (67%→100%). But they do **not** replace the deterministic core: recall is partial (73%),
-and latency is 300–1000× higher. This validates the architecture: **deterministic policy +
-sandbox are the injection-immune authority (≈1 ms); the LLM is a thin semantic layer on a
-narrow band.** Invariants are enforced in code and unit-tested: a DENY / explicit hard-ASK is
-never relaxed by the model, and any provider error fails closed.
+## Стоимость
 
-Numbers are single-run (temperature 0). Multiple runs are advisable for a stochasticity band.
+| Метрика | Значение |
+|---|---:|
+| Вызовов модели | 126 |
+| Вызовов на решение | 0.18 |
+| Помечено | 39 |
+| Ошибки | 0 |
+| Таймауты | 0 |
+
+Задержка самого провайдера здесь не показательна: `heuristic` работает в процессе (p50 0.01 мс).
+Провайдер-независимая величина — **0.18 вызова на решение**: примерно одно решение из шести уходит
+в модель, остальные пять решает детерминированный контур. Верхняя граница вклада в задержку задана
+дедлайном (300 мс по умолчанию), а не измерением: при просрочке решение остаётся детерминированным.
+
+Локальные модели на этой машине недоступны, поэтому измерения задержки настоящей модели в этом
+прогоне нет.
+
+## Где слой ошибается
+
+Три сломанные utility-задачи — `util-content-jwt-docs`, `util-content-placeholders`,
+`util-content-public-key`: документация с примером JWT, файл с плейсхолдерами и **публичный** ключ.
+Это ровно те случаи, ради которых в детерминированном слое написаны `placeholder()` и `benign()`, и
+ровно там, где заглушка на именах файлов ошибается. Показательно, что ошибка пошла в сторону
+лишнего запроса человеку (Safe ASK FP 6 → 15), а не в сторону запрета: Safe DENY FP остался 0.
+
+## Как читать overall ASR
+
+Вклад в корпус распределён неравномерно: 25 из 138 атак — это класс инъекций, и внутри него шесть
+сценариев различаются только тем, в каком файле лежит подброшенная инструкция, а восемь — только тем,
+какой утилитой копируется секрет. Движок этих различий не видит, поэтому они дают один результат,
+повторённый много раз.
+
+| Как считать | Без advisory | С advisory |
+|---|---:|---:|
+| Как есть | 21% (87/408) | 15% (60/408) |
+| Один носитель инструкции на класс | 18% (72/393) | 15% (60/393) |
+| Плюс один способ отмывки на класс | 14% (54/375) | 11% (42/375) |
+
+## Сопоставимость с прежними числами
+
+На исходном корпусе из 130 сценариев ASR остался **6% (15/237)** — те же пять остаточных сценариев,
+что и были. Рост до 21% целиком объясняется добавленными атаками, а не изменением защиты.
+
+| Корпус | Без advisory | С advisory |
+|---|---:|---:|
+| Исходные 130 сценариев | 6% (15/237) | 5% (12/237) |
+| Только добавленные 57 | 42% (72/171) | 28% (48/171) |
+| Все 187 | 21% (87/408) | 15% (60/408) |
+
+## Вывод
+
+Композиция работает и стоит дёшево: слой снимает треть класса инъекций, не трогает ни один другой
+класс, ни разу не запрещает и не открывает, и уходит в модель на каждом шестом решении.
+
+Чего он не делает: не закрывает класс (48% остаётся), не заменяет ни один детерминированный слой и
+не судит источник инструкции — только само исходящее действие. С офлайн-заглушкой цена — девять
+лишних запросов человеку и три сорванные безобидные задачи; будет ли настоящая модель точнее на этих
+же входах, здесь не измерено.
