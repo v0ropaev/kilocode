@@ -224,6 +224,7 @@ const layer = Layer.effect(
             file,
             scratch: path.join(Global.Path.state, "extension-host", digest.slice(0, 16)),
             options: securityOptions,
+            allowUnconfinedReads: ExtensionHost.unconfinedReadsAllowed(globalConfig),
           })
         // kilocode_change end
         const loaded = yield* Effect.promise(() =>

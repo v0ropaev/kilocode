@@ -272,32 +272,33 @@ const layer = Layer.effect(
                 file: match,
                 scratch: path.join(Global.Path.state, "extension-host", digest.slice(0, 16)),
                 options: securityOptions,
+                allowUnconfinedReads: ExtensionHost.unconfinedReadsAllowed(globalConfig),
               }).catch(() => undefined),
             )
-            if (hosted) {
-              for (const item of hosted.tools) {
-                custom.push(
-                  ToolOrigin.mark(
-                    {
-                      id: item.id,
-                      description: item.description,
-                      parameters: Schema.Unknown,
-                      execute: (args: unknown, toolCtx: Tool.Context) =>
-                        Effect.promise(async () => {
-                          const result = await hosted.invoke(item.id, args, toolCtx.sessionID)
-                          return {
-                            title: item.id,
-                            metadata: { extension: { digest, confined: hosted.confined } },
-                            output: result.ok ? (result.output ?? "") : `extension refused: ${result.error ?? "error"}`,
-                          }
-                        }),
-                    } as unknown as Tool.Def,
-                    origin,
-                  ),
-                )
-              }
-              continue
+            for (const item of hosted?.tools ?? []) {
+              custom.push(
+                ToolOrigin.mark(
+                  {
+                    id: item.id,
+                    description: item.description,
+                    parameters: Schema.Unknown,
+                    execute: (args: unknown, toolCtx: Tool.Context) =>
+                      Effect.promise(async () => {
+                        const result = await hosted!.invoke(item.id, args, toolCtx.sessionID)
+                        return {
+                          title: item.id,
+                          metadata: { extension: { digest, confined: hosted!.confined } },
+                          output: result.ok ? (result.output ?? "") : `extension refused: ${result.error ?? "error"}`,
+                        }
+                      }),
+                  } as unknown as Tool.Def,
+                  origin,
+                ),
+              )
             }
+            // A host that could not start is a refusal, not a reason to import the file here: the
+            // whole point of routing this extension to a host is that it never runs in this process.
+            continue
           }
           // kilocode_change end
           // `match` is an absolute filesystem path from `Glob.scanSync(..., { absolute: true })`.

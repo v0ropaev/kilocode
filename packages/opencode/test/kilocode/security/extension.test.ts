@@ -1,9 +1,9 @@
 // The permissioned extension runtime.
 //
 // The code-trust boundary decides whether a project extension may load. These tests are about what
-// that approval then buys it. The interesting assertions are the empirical ones: an extension running in the host
-// must *fail* when it reaches for `node:fs`, `fetch` or a subprocess directly, and must succeed only
-// through mediated capabilities the security engine agreed to.
+// that approval then buys it. The interesting assertions are the empirical ones: an extension in the
+// host must *fail* when it reaches for `node:fs`, `fetch`, a subprocess or a file outside its own
+// working set, and must succeed only through mediated capabilities the security engine agreed to.
 import { afterAll, afterEach, describe, expect, test } from "bun:test"
 import fs from "fs/promises"
 import os from "os"
@@ -47,6 +47,7 @@ async function startWith(source: string, granted: ToolCapabilityName[], name = `
   const file = path.join(ext, name)
   await fs.writeFile(file, source)
   const handle = await ExtensionHost.start({
+    allowUnconfinedReads: !ExtensionHost.readConfinementAvailable(),
     identity: {
       type: "custom-tool",
       origin: "workspace",
@@ -236,6 +237,212 @@ describe("trust closure", () => {
       `import path from "node:path"\nimport x from "some-package"\nexport default { path, x }\n`,
     )
     expect(CodeTrust.closure(entry)).toHaveLength(1)
+  })
+})
+
+describe("the read boundary", () => {
+  // Everything here is measured, not asserted: the extension really tries the read and reports what
+  // happened, so a test passes only because the operating system refused.
+  const SECRET = "TOP-SECRET-EXTENSION-READ-CANARY"
+  const host = path.join(real, "host-home")
+  const other = path.join(real, "unrelated-repo")
+
+  async function seed() {
+    await fs.mkdir(path.join(host, ".ssh"), { recursive: true })
+    await fs.mkdir(other, { recursive: true })
+    await fs.writeFile(path.join(host, ".ssh", "id_rsa"), `${SECRET}\n`)
+    await fs.writeFile(path.join(other, "notes.md"), `${SECRET}\n`)
+    await fs.writeFile(path.join(ws, ".env"), `API_TOKEN=${SECRET}\n`)
+    await fs.writeFile(path.join(ws, "src.ts"), "export const value = 1\n")
+    await fs.mkdir(path.join(ws, "nested"), { recursive: true })
+    await fs.symlink(path.join(host, ".ssh", "id_rsa"), path.join(ws, "escape")).catch(() => {})
+    await fs.symlink("../escape", path.join(ws, "nested", "escape")).catch(() => {})
+    await fs.symlink(path.join(host, ".ssh"), path.join(ws, "escape-dir")).catch(() => {})
+  }
+
+  const PROBE = (paths: Record<string, string>) =>
+    [
+      `import fs from "node:fs"`,
+      TOOL(
+        [
+          `const out = {}`,
+          ...Object.entries(paths).map(
+            ([key, file]) =>
+              `try { const t = fs.readFileSync(${JSON.stringify(file)}, "utf8"); out.${key} = t.includes(${JSON.stringify(SECRET)}) ? "LEAKED" : "read" } catch { out.${key} = "blocked" }`,
+          ),
+          `try { out.home = fs.readdirSync(${JSON.stringify(os.homedir())}).length > 0 ? "LISTED" : "empty" } catch { out.home = "blocked" }`,
+          `return JSON.stringify(out)`,
+        ].join("\n    "),
+      ),
+    ].join("\n")
+
+  test("host secrets, unrelated checkouts and symlink escapes are all unreadable", async () => {
+    if (!ExtensionHost.readConfinementAvailable()) return
+    await seed()
+    const handle = await startWith(
+      PROBE({
+        ssh: path.join(host, ".ssh", "id_rsa"),
+        unrelated: path.join(other, "notes.md"),
+        symlink: path.join(ws, "escape"),
+        nested: path.join(ws, "nested", "escape"),
+        dirlink: path.join(ws, "escape-dir", "id_rsa"),
+        traversal: path.join(ws, "..", "host-home", ".ssh", "id_rsa"),
+        kiloConfig: path.join(Global.Path.config, "config.json"),
+        // A credential store that happens to sit inside the workspace is not ambient either.
+        env: path.join(ws, ".env"),
+      }),
+      ["filesystem-read"],
+      "read-boundary.ts",
+    )
+    expect(handle.readConfined).toBe(true)
+    const result = await handle.invoke(handle.tools[0]!.id, {})
+    const report = JSON.parse(result.output ?? "{}")
+    for (const key of ["ssh", "unrelated", "symlink", "nested", "dirlink", "traversal", "kiloConfig", "env", "home"]) {
+      expect(`${key}=${report[key]}`).toBe(`${key}=blocked`)
+    }
+    // The secret never reached the extension, so it cannot reach the tool result either.
+    expect(result.output ?? "").not.toContain(SECRET)
+  })
+
+  test("the workspace, the scratch directory and its own imports stay readable", async () => {
+    if (!ExtensionHost.readConfinementAvailable()) return
+    await seed()
+    const helper = path.join(ext, "read-helper.ts")
+    await fs.writeFile(helper, `export const helper = "from-import-closure"\n`)
+    const scratchDir = path.join(scratch, "read-utility.ts")
+    const handle = await startWith(
+      [
+        `import fs from "node:fs"`,
+        `import { helper } from "./read-helper"`,
+        TOOL(
+          [
+            `const out = { helper }`,
+            `try { out.workspace = fs.readFileSync(${JSON.stringify(path.join(ws, "src.ts"))}, "utf8").trim() } catch (e) { out.workspace = "blocked" }`,
+            `try { fs.writeFileSync(${JSON.stringify(path.join(scratchDir, "note.txt"))}, "scratch-ok"); out.scratch = fs.readFileSync(${JSON.stringify(path.join(scratchDir, "note.txt"))}, "utf8") } catch (e) { out.scratch = "blocked" }`,
+            `try { out.own = fs.readFileSync(${JSON.stringify(helper)}, "utf8").length > 0 ? "read" : "empty" } catch { out.own = "blocked" }`,
+            `return JSON.stringify(out)`,
+          ].join("\n    "),
+        ),
+      ].join("\n"),
+      ["filesystem-read"],
+      "read-utility.ts",
+    )
+    const result = await handle.invoke(handle.tools[0]!.id, {})
+    const report = JSON.parse(result.output ?? "{}")
+    expect(report.helper).toBe("from-import-closure")
+    expect(report.workspace).toBe("export const value = 1")
+    expect(report.scratch).toBe("scratch-ok")
+    expect(report.own).toBe("read")
+  })
+
+  test("write, network and process confinement still hold with reads confined", async () => {
+    if (!ExtensionHost.readConfinementAvailable()) return
+    const target = path.join(ws, "still-confined.txt")
+    const handle = await startWith(
+      [
+        `import fs from "node:fs"`,
+        TOOL(
+          [
+            `const out = {}`,
+            `try { fs.writeFileSync(${JSON.stringify(target)}, "x"); out.write = "SUCCEEDED" } catch { out.write = "blocked" }`,
+            `try { await fetch("http://127.0.0.1:1/x"); out.net = "SUCCEEDED" } catch { out.net = "blocked" }`,
+            `try { const p = Bun.spawnSync(["/bin/sh","-c","printf x > ${target}.spawn"]); out.spawn = p.success ? "SUCCEEDED" : "blocked" } catch { out.spawn = "blocked" }`,
+            `return JSON.stringify(out)`,
+          ].join("\n    "),
+        ),
+      ].join("\n"),
+      ["filesystem-read"],
+      "read-write-mix.ts",
+    )
+    const report = JSON.parse((await handle.invoke(handle.tools[0]!.id, {})).output ?? "{}")
+    expect(report.write).toBe("blocked")
+    expect(report.net).toBe("blocked")
+    expect(report.spawn).toBe("blocked")
+  })
+
+  test("a read the OS refuses is still reachable through the mediated path, under policy", async () => {
+    if (!ExtensionHost.readConfinementAvailable()) return
+    await seed()
+    const handle = await startWith(
+      TOOL(
+        [
+          `const out = {}`,
+          `try { out.workspace = (await ctx.kilo.readFile(${JSON.stringify(path.join(ws, "src.ts"))})).trim() } catch (e) { out.workspace = "refused" }`,
+          `try { out.env = await ctx.kilo.readFile(${JSON.stringify(path.join(ws, ".env"))}) } catch (e) { out.env = "refused" }`,
+          `return JSON.stringify(out)`,
+        ].join("\n    "),
+      ),
+      ["filesystem-read"],
+      "read-mediated.ts",
+    )
+    const report = JSON.parse((await handle.invoke(handle.tools[0]!.id, {})).output ?? "{}")
+    expect(report.workspace).toBe("export const value = 1")
+    // Ambient denial is not the only gate: the mediated path applies the ordinary read policy, and a
+    // credential file is a hard ASK there — which an extension, having no prompt, cannot satisfy.
+    expect(report.env).toBe("refused")
+    expect(JSON.stringify(report)).not.toContain(SECRET)
+  })
+})
+
+describe("activation", () => {
+  test("a platform that can confine reads starts the host", () => {
+    expect(ExtensionHost.activation({ readConfined: true })).toEqual({ allow: true, reason: "read-confined" })
+  })
+
+  test("a platform that cannot refuses rather than running with ambient reads", () => {
+    const verdict = ExtensionHost.activation({ readConfined: false, reason: "no backend" })
+    expect(verdict.allow).toBe(false)
+    expect(verdict.reason).toBe("read-confinement-unavailable:no backend")
+  })
+
+  test("a profile that could not be applied counts as unconfined, not as confined", () => {
+    // The backend answers whether the profile was applied; a failure must not leave a host running
+    // unconfined while the handle claims otherwise.
+    const verdict = ExtensionHost.activation({ readConfined: false, reason: "profile could not be applied" })
+    expect(verdict.allow).toBe(false)
+    expect(verdict.reason).toContain("profile could not be applied")
+  })
+
+  test("only the user's own configuration can accept an unconfined host", () => {
+    expect(ExtensionHost.activation({ readConfined: false, allowUnconfinedReads: true }).allow).toBe(true)
+    expect(ExtensionHost.unconfinedReadsAllowed({})).toBe(false)
+    expect(ExtensionHost.unconfinedReadsAllowed({ experimental: {} })).toBe(false)
+    expect(
+      ExtensionHost.unconfinedReadsAllowed({ experimental: { security_auto_extension_unconfined_reads: true } }),
+    ).toBe(true)
+  })
+})
+
+describe("the read profile", () => {
+  test("confinement covers the working set and excludes Kilo's own configuration", () => {
+    const profile = ExtensionHost.profileFor({
+      scratch: path.join(scratch, "profile"),
+      workspace: ws,
+      entry: path.join(ext, "entry.ts"),
+      confineReads: true,
+    })
+    const allowed = (profile.filesystem.allowRead ?? []).map((rule) => rule.path)
+    expect(allowed).toContain(ws)
+    expect(allowed).toContain(ext)
+    expect(allowed.some((item) => item === os.homedir())).toBe(false)
+    const denied = (profile.filesystem.denyRead ?? []).map((rule) => rule.path)
+    expect(denied.length).toBeGreaterThan(0)
+    expect(profile.filesystem.denyNames).toContain(".ssh")
+    expect(profile.filesystem.denyNames).toContain(".env")
+    // Writes stay confined to the scratch directory whatever the read policy is.
+    expect(profile.filesystem.allowWrite.map((rule) => rule.path)).toEqual([path.join(scratch, "profile")])
+    expect(profile.network.mode).toBe("deny")
+  })
+
+  test("with confinement off the profile leaves reads open, exactly as before", () => {
+    const profile = ExtensionHost.profileFor({
+      scratch: path.join(scratch, "open"),
+      workspace: ws,
+      entry: path.join(ext, "entry.ts"),
+      confineReads: false,
+    })
+    expect(profile.filesystem.allowRead).toBeUndefined()
+    expect(profile.filesystem.denyNames).toEqual([])
   })
 })
 

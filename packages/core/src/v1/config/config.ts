@@ -358,6 +358,10 @@ export const Info = Schema.Struct({
         description:
           'Capabilities granted per approved extension digest, e.g. {"<sha256>": ["filesystem-write","network"]}. Approving an extension\'s code does not grant these; without an entry an extension gets read-only capability. Global config only.',
       }),
+      security_auto_extension_unconfined_reads: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Accept extension hosts with ambient read access to your files: it turns read confinement off where the platform supports it, and lets an approved extension run where it does not (by default the host refuses to start there rather than reading whatever you can). Global config only.",
+      }),
       security_auto_tool_capabilities: Schema.optional(
         Schema.Record(Schema.String, Schema.mutable(Schema.Array(Schema.String))),
       ).annotate({

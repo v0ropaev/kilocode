@@ -1,8 +1,9 @@
-import { readFileSync, statSync, writeFileSync, mkdirSync } from "fs"
+import { existsSync, readFileSync, realpathSync, statSync, writeFileSync, mkdirSync } from "fs"
 import path from "path"
 import { Effect } from "effect"
+import { Global } from "@opencode-ai/core/global"
 import * as Log from "@opencode-ai/core/util/log"
-import { backendSupport, prepareLaunch, type Profile } from "@kilocode/sandbox"
+import { backendSupport, prepareLaunch, readConfinementSupport, type Profile } from "@kilocode/sandbox"
 import { SecurityGate } from "../gate"
 import { SecretContent } from "../state/content"
 import { SecuritySessionState } from "../state/store"
@@ -65,12 +66,20 @@ export namespace ExtensionHost {
     options: SecurityGate.Options
     /** Session the extension acts on behalf of, when it is running inside one. */
     sessionID?: string
+    /**
+     * The user has accepted an extension host with ambient read access to their files. It both turns
+     * read confinement off where the platform supports it and permits activation where it does not;
+     * without it, a platform that cannot confine reads refuses to run the extension at all.
+     */
+    allowUnconfinedReads?: boolean
   }
 
   export interface Handle {
     identity: ExtensionProtocol.Identity
     /** True when the OS sandbox profile was applied to the child process. */
     confined: boolean
+    /** True when that profile also confined what the child may read. */
+    readConfined: boolean
     tools: { id: string; description: string }[]
     hooks: string[]
     invoke(tool: string, args: unknown, sessionID?: string): Promise<{ ok: boolean; output?: string; error?: string }>
@@ -93,12 +102,95 @@ export namespace ExtensionHost {
     "NPM_TOKEN",
   ]
 
-  export function profileFor(scratch: string): Profile {
+  /**
+   * Immutable operating-system locations a runtime has to read to start at all. None of them is a
+   * place user credentials live; the user's home directory is deliberately not among them.
+   */
+  const SYSTEM_READ: Record<string, string[]> = {
+    darwin: ["/usr", "/bin", "/sbin", "/System", "/Library", "/opt", "/dev", "/private/var/db", "/private/var/select"],
+    linux: ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/dev", "/proc", "/sys"],
+  }
+
+  /**
+   * Names that stay unreadable even inside an allowed subtree, so a credential store that happens to
+   * sit in the workspace is not ambient-readable either. Content behind these names is still reachable
+   * through the mediated capability path, where policy decides.
+   */
+  const DENY_NAMES = [
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".kube",
+    ".docker",
+    ".netrc",
+    ".npmrc",
+    ".git-credentials",
+    ".env",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+  ]
+
+  function canonical(target: string): string | undefined {
+    try {
+      return realpathSync(target)
+    } catch {
+      return existsSync(target) ? target : undefined
+    }
+  }
+
+  function subtree(target: string | undefined) {
+    const resolved = target ? canonical(target) : undefined
+    return resolved ? [{ path: resolved, kind: "subtree" as const }] : []
+  }
+
+  export interface ProfileInput {
+    /** Disposable directory the host may write to directly. */
+    scratch: string
+    /** The workspace the extension was discovered in: its legitimate working set. */
+    workspace: string
+    /** The approved entrypoint; its directory holds the local modules it may import. */
+    entry: string
+    /** When false the profile leaves ambient reads open, as the runtime did before confinement. */
+    confineReads?: boolean
+  }
+
+  /**
+   * The profile an extension host runs under.
+   *
+   * Writes go to the scratch directory and nowhere else, the network is denied, and — when the
+   * platform can enforce it — ambient reads are confined to what an extension legitimately needs: the
+   * runtime, its own code, the workspace it belongs to and its scratch directory. Everything else,
+   * the rest of the user's home included, is simply not readable. Reads the extension has a real
+   * reason to make outside that set go through the mediated capability path, where the security engine
+   * decides and the content classifier sees what came back.
+   */
+  export function profileFor(input: ProfileInput): Profile {
+    const scratch = canonical(input.scratch) ?? input.scratch
+    const allowRead = input.confineReads
+      ? [
+          ...(SYSTEM_READ[process.platform] ?? []).flatMap((item) => subtree(item)),
+          // The runtime binary and the host entry Kilo evaluates inside the child.
+          ...subtree(path.dirname(process.execPath)),
+          ...subtree(import.meta.dir),
+          // The extension's own directory: the entrypoint plus the local modules of its closure.
+          ...subtree(path.dirname(input.entry)),
+          ...subtree(input.workspace),
+          { path: scratch, kind: "subtree" as const },
+        ]
+      : undefined
     return {
       filesystem: {
         allowWrite: [{ path: scratch, kind: "subtree" }],
         denyWrite: [],
-        denyNames: [],
+        denyNames: input.confineReads ? DENY_NAMES : [],
+        ...(allowRead
+          ? {
+              allowRead,
+              // Kilo's own configuration and state decide what is trusted; an extension never reads them.
+              denyRead: [...subtree(Global.Path.config), ...subtree(Global.Path.state)],
+            }
+          : {}),
         temporaryDirectory: scratch,
       },
       network: { mode: "deny", allowedHosts: [] },
@@ -108,6 +200,32 @@ export namespace ExtensionHost {
 
   export function sandboxAvailable(): boolean {
     return backendSupport({ mode: "deny", allowedHosts: [] }).available
+  }
+
+  /** Whether this platform can confine what an extension host reads, not merely what it writes. */
+  export function readConfinementAvailable(): boolean {
+    return readConfinementSupport({ mode: "deny", allowedHosts: [] }).available
+  }
+
+  /**
+   * The escape hatch for a platform that cannot confine reads. It is deliberately global-config only
+   * and deliberately explicit: without it an approved workspace extension does not run there at all,
+   * rather than quietly running with ambient read access to the user's files.
+   */
+  export function unconfinedReadsAllowed(global: unknown): boolean {
+    const experimental = (global as { experimental?: Record<string, unknown> } | undefined)?.experimental
+    return experimental?.["security_auto_extension_unconfined_reads"] === true
+  }
+
+  /**
+   * Whether a host may start at all. Where reads cannot be confined the answer is no: an approved
+   * extension running with the user's own read authority is the thing this boundary exists to prevent,
+   * so it fails safe instead of downgrading, and only the user's own configuration can override it.
+   */
+  export function activation(input: { readConfined: boolean; allowUnconfinedReads?: boolean; reason?: string }) {
+    if (input.readConfined) return { allow: true, reason: "read-confined" }
+    if (input.allowUnconfinedReads) return { allow: true, reason: "unconfined-reads-accepted" }
+    return { allow: false, reason: `read-confinement-unavailable:${input.reason ?? "unsupported"}` }
   }
 
   function environmentFor(workspace: string) {
@@ -263,18 +381,38 @@ export namespace ExtensionHost {
   export async function start(input: StartInput): Promise<Handle> {
     mkdirSync(input.scratch, { recursive: true })
     const workspace = input.options.workspace.directory
-    const confined = sandboxAvailable()
+    const wanted = sandboxAvailable() && !input.allowUnconfinedReads && readConfinementAvailable()
     const base = {
       command: process.execPath,
       args: ["run", ENTRY],
       cwd: workspace,
       environment: environmentFor(workspace),
     }
-    const launch = confined
+    const profile = profileFor({
+      scratch: input.scratch,
+      workspace,
+      entry: input.file,
+      confineReads: wanted,
+    })
+    // Whether the profile was applied is the answer the backend gives, not an assumption: a profile
+    // that failed to build must not leave a host running unconfined while the handle claims otherwise.
+    const prepared = sandboxAvailable()
       ? await Effect.runPromise(
-          Effect.scoped(prepareLaunch(profileFor(input.scratch), base)).pipe(Effect.catch(() => Effect.succeed(base))),
+          Effect.scoped(prepareLaunch(profile, base)).pipe(
+            Effect.map((launch) => ({ launch, applied: true })),
+            Effect.catch(() => Effect.succeed({ launch: base, applied: false })),
+          ),
         )
-      : base
+      : { launch: base, applied: false }
+    const launch = prepared.launch
+    const confined = prepared.applied
+    const readConfined = confined && wanted
+    const permitted = activation({
+      readConfined,
+      allowUnconfinedReads: input.allowUnconfinedReads,
+      reason: readConfinementSupport({ mode: "deny", allowedHosts: [] }).reason ?? "profile could not be applied",
+    })
+    if (!permitted.allow) throw new Error(`extension host refused to start: ${permitted.reason}`)
 
     const proc = Bun.spawn([launch.command, ...launch.args], {
       cwd: launch.cwd,
@@ -393,6 +531,7 @@ export namespace ExtensionHost {
     return {
       identity: input.identity,
       confined,
+      readConfined,
       tools: loaded.tools,
       hooks: loaded.hooks,
       refusals,
