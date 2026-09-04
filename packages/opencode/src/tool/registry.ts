@@ -69,6 +69,8 @@ import { BackgroundJob } from "@/background/job"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import * as ToolNetwork from "@/kilocode/sandbox/network" // kilocode_change
 import { ToolOrigin } from "@/kilocode/security/tool/origin" // kilocode_change
+import { CodeTrust } from "@/kilocode/security/code/trust" // kilocode_change
+import { SecurityFlag } from "@/kilocode/security/flag" // kilocode_change
 import { Global } from "@opencode-ai/core/global" // kilocode_change
 import { MemoryService } from "@kilocode/kilo-memory/effect/service" // kilocode_change
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -234,19 +236,26 @@ const layer = Layer.effect(
         // kilocode_change start - tools loaded from the user's own global config directory are a
         // different trust level from tools a checked-out repository ships; record which is which
         const globalDir = path.resolve(Global.Path.config)
+        // A discovered file's module scope runs the instant it is imported, so the
+        // trust decision has to happen here, between discovery and `import()`.
+        const codePolicy = CodeTrust.policy(
+          yield* config.getGlobal().pipe(Effect.catch(() => Effect.succeed(undefined))),
+          yield* SecurityFlag.codeEnabled(config),
+        )
         // kilocode_change end
         for (const match of matches) {
           const namespace = path.basename(match, path.extname(match))
           const origin = path.resolve(match).startsWith(globalDir + path.sep) ? "trusted-config" : "workspace" // kilocode_change
+          // kilocode_change start - discovery != execution: an untrusted file is never imported
+          if (!CodeTrust.guard({ file: match, kind: "custom-tool", policy: codePolicy }).allow) continue
+          // kilocode_change end
           // `match` is an absolute filesystem path from `Glob.scanSync(..., { absolute: true })`.
           // Import it as `file://` so Node on Windows accepts the dynamic import.
           const mod = yield* Effect.promise(() => import(pathToFileURL(match).href))
           for (const [id, def] of Object.entries(mod)) {
             if (!isPluginTool(def)) continue
             // kilocode_change start - record the tool's structural origin for the security layer
-            custom.push(
-              ToolOrigin.mark(fromPlugin(id === "default" ? namespace : `${namespace}_${id}`, def), origin),
-            )
+            custom.push(ToolOrigin.mark(fromPlugin(id === "default" ? namespace : `${namespace}_${id}`, def), origin))
             // kilocode_change end
           }
         }

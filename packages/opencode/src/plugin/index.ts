@@ -33,6 +33,8 @@ import { AnacondaDesktopPlugin } from "@/kilocode/anaconda-desktop/provider" // 
 import { registerAdapter } from "@/control-plane/adapters"
 import type { WorkspaceAdapter } from "@/control-plane/types"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { CodeTrust } from "@/kilocode/security/code/trust" // kilocode_change
+import { SecurityFlag } from "@/kilocode/security/flag" // kilocode_change
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { InstallationChannel } from "@opencode-ai/core/installation/version"
 
@@ -191,10 +193,26 @@ const layer = Layer.effect(
         }
         if (plugins.length) yield* config.waitForDependencies()
 
+        // kilocode_change start - classify repository-controlled plugin code before
+        // its module scope can run. Read from the global config only: a project must not trust itself.
+        const codePolicy = CodeTrust.policy(
+          yield* config.getGlobal().pipe(Effect.catch(() => Effect.succeed(undefined))),
+          yield* SecurityFlag.codeEnabled(config),
+        )
+        // kilocode_change end
         const loaded = yield* Effect.promise(() =>
           PluginLoader.loadExternal({
             items: plugins,
             kind: "server",
+            // kilocode_change start - the trust decision sits between resolve and import
+            trust: (resolved, origin) =>
+              CodeTrust.guard({
+                file: resolved.entry,
+                kind: "plugin",
+                scope: origin.scope,
+                policy: codePolicy,
+              }).allow,
+            // kilocode_change end
             report: {
               start(candidate) {},
               missing(candidate, _retry, message) {},

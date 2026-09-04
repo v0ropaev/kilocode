@@ -25,6 +25,8 @@ export namespace SecurityFlag {
     tools: boolean
     /** Secret classification of content the agent actually obtained. */
     content: boolean
+    /** Trust boundary for executable project code, evaluated before import. */
+    code: boolean
   }
 
   function truthy(value: string | undefined) {
@@ -56,8 +58,21 @@ export namespace SecurityFlag {
       egress: layer(process.env["KILO_SECURITY_AUTO_EGRESS"], global?.experimental?.security_auto_egress),
       tools: layer(process.env["KILO_SECURITY_AUTO_TOOLS"], global?.experimental?.security_auto_tools),
       content: layer(process.env["KILO_SECURITY_AUTO_CONTENT"], global?.experimental?.security_auto_content),
+      code: layer(process.env["KILO_SECURITY_AUTO_CODE"], global?.experimental?.security_auto_code),
     }
     return result
+  })
+
+  /**
+   * Is the executable-code trust boundary active? Resolved on its own because the loaders that need
+   * it run during instance initialisation, long before any session or gate options exist.
+   */
+  export const codeEnabled = Effect.fn("SecurityFlag.codeEnabled")(function* (
+    config: Pick<Config.Interface, "getGlobal">,
+  ) {
+    if (!(yield* enabled(config))) return false
+    const global = yield* config.getGlobal().pipe(Effect.catch(() => Effect.succeed(undefined)))
+    return layer(process.env["KILO_SECURITY_AUTO_CODE"], global?.experimental?.security_auto_code)
   })
 
   /**

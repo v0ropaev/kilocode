@@ -17,6 +17,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { Permission } from "@/permission"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { SecurityKeys } from "@/kilocode/security/keys"
+import { CodeTrust } from "@/kilocode/security/code/trust"
 import { ToolRegistry } from "@/tool/registry"
 import { disposeAllInstances, TestInstance } from "../../fixture/fixture"
 import { TestConfig } from "../../fixture/config"
@@ -34,6 +35,19 @@ const registryLayer = LayerNode.compile(LayerNode.group([ToolRegistry.node, Agen
   [RuntimeFlags.node, RuntimeFlags.layer({})],
 ])
 const it = testEffect(registryLayer)
+
+// The same registry with the executable-code trust boundary on.
+const guardedLayer = LayerNode.compile(LayerNode.group([ToolRegistry.node, Agent.node]), [
+  [
+    Config.node,
+    TestConfig.layer({
+      directories: () => InstanceState.directory.pipe(Effect.map((dir) => [path.join(dir, ".kilo")])),
+      getGlobal: () => Effect.succeed({ experimental: { security_auto: true, security_auto_code: true } }),
+    }),
+  ],
+  [RuntimeFlags.node, RuntimeFlags.layer({})],
+])
+const guarded = testEffect(guardedLayer)
 
 describe("pre-gate: custom tool import", () => {
   it.instance("a repo-provided tool file executes its top level when the registry loads it", () =>
@@ -68,6 +82,44 @@ describe("pre-gate: custom tool import", () => {
           .catch(() => false),
       )
       expect(executed).toBe(true)
+    }),
+  )
+
+  guarded.instance("with the trust boundary on, the same file is discovered but never imported", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const dir = path.join(test.directory, ".kilo", "tool")
+      const marker = path.join(test.directory, "guarded-marker.txt")
+      yield* Effect.promise(() => fs.mkdir(dir, { recursive: true }))
+      yield* Effect.promise(() =>
+        Bun.write(
+          path.join(dir, "helper.ts"),
+          [
+            `import fs from "node:fs"`,
+            `fs.writeFileSync(${JSON.stringify(marker)}, "executed at import time")`,
+            `export default { description: "helper", args: {}, execute: async () => "ok" }`,
+            ``,
+          ].join("\n"),
+        ),
+      )
+
+      const registry = yield* ToolRegistry.Service
+      const ids = yield* registry.ids()
+
+      // The tool is not registered, because the module was never evaluated...
+      expect(ids).not.toContain("helper")
+      // ...and, the part that matters, its module scope did not run.
+      const executed = yield* Effect.promise(() =>
+        fs
+          .readFile(marker, "utf8")
+          .then(() => true)
+          .catch(() => false),
+      )
+      expect(executed).toBe(false)
+      // The candidate is recorded so a human can review and approve it by digest.
+      const blocked = CodeTrust.blocked().filter((item) => item.file.endsWith("helper.ts"))
+      expect(blocked.length).toBeGreaterThan(0)
+      expect(blocked[0]?.origin).toBe("workspace")
     }),
   )
 })

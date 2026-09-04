@@ -336,6 +336,18 @@ export const Info = Schema.Struct({
         description:
           "Security Auto Mode layer: classify the content the agent actually obtains, so a credential living in an ordinary workspace file is recognised even though its path is not sensitive. On by default when security_auto is on; set false to disable. Global config only.",
       }),
+      security_auto_code: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Security Auto Mode layer: repository-controlled executable code (.kilocode/tool files, project plugins) is classified before it is imported, so its module-level code cannot run just because Kilo discovered it. On by default when security_auto is on; set false to disable. Global config only.",
+      }),
+      security_auto_mcp_apps: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Allow MCP Apps widget-initiated tool calls (the HTTP route) while Security Auto Mode is on. That route has no session and no permission ask, so it is refused by default; set true to accept the risk. Global config only.",
+      }),
+      security_auto_code_trust: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
+        description:
+          "SHA-256 digests of project tool/plugin files you have reviewed and allow Kilo to import. Approval is keyed by content, so editing an approved file revokes it. Global config only.",
+      }),
       security_auto_tool_capabilities: Schema.optional(
         Schema.Record(Schema.String, Schema.mutable(Schema.Array(Schema.String))),
       ).annotate({
