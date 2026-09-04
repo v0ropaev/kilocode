@@ -5,10 +5,11 @@
  * It answers: does adding the LLM layers make the injection-driven residual better or worse,
  * and at what false-positive cost — using the HeuristicProvider as a conservative model stand-in.
  */
-import { HeuristicProvider } from "./provider"
+import { providerFromEnv, ModelProvider } from "./provider"
 import { runContextChecker, escalateWithContext, adjustDecision, type Decision } from "./layers"
 
-const provider = new HeuristicProvider()
+// Provider is chosen by env: LLM=heuristic (default) | anthropic | openai (Ollama/Groq/…).
+const provider = providerFromEnv()
 
 // ---- 1. Untrusted content that carries an injection (expected: suspicious) --------------------
 const INJECTION_CONTENT: Array<{ id: string; source: any; content: string }> = [
@@ -126,8 +127,20 @@ async function main() {
   L(`| Soft-ASKs auto-resolved (friction saved) | ${frictionSaved} |`)
   L(`| Overeager actions escalated to DENY | ${overeagerCaught} |`)
   L("")
-  L("Note: HeuristicProvider is a conservative offline stand-in; a real small model would detect")
-  L("injections at least as well. Invariants hold: DENY/hard-ASK are never relaxed; errors fail closed.")
+  L(`\n_Provider: ${provider.name}_`)
+  if (provider instanceof ModelProvider) {
+    const s = provider.stats()
+    L("")
+    L("## Model cost / latency")
+    L(`| Metric | Value |`)
+    L(`| --- | --- |`)
+    L(`| Model calls | ${s.calls} |`)
+    L(`| Call latency p50 | ${s.p50} ms |`)
+    L(`| Call latency p95 | ${s.p95} ms |`)
+  } else {
+    L("\nNote: HeuristicProvider is a conservative offline stand-in. Run with a real model to measure")
+    L("true detection/FPR and latency: `LLM=anthropic` (needs ANTHROPIC_API_KEY) or `LLM=openai` (Ollama).")
+  }
 }
 
 main()
