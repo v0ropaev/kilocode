@@ -520,7 +520,7 @@ export namespace SecurityGate {
       return { source: "mcp", name: input.tool }
     if (input.tool === "webfetch" || input.tool === "websearch") return { source: "web", name: input.tool }
     // Exactly one: with several reads in one call the excerpt cannot be attributed to either.
-    const only = input.candidates.length === 1 ? input.candidates[0]!.canonical : undefined
+    const only = input.candidates.length === 1 ? input.candidates[0].canonical : undefined
     if (only === undefined) {
       if (input.provenance === "workspace" || input.provenance === "plugin") return { source: "tool", name: input.tool }
       return undefined

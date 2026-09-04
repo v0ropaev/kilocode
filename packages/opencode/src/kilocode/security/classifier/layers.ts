@@ -150,6 +150,26 @@ export namespace SemanticEvidence {
   }
 
   /**
+   * How much of a hedged verdict to act on.
+   *
+   * `conservative` (the default) acts only on a verdict the provider is willing to stand behind.
+   * `balanced` also acts on a middling SUSPICIOUS, as a soft ask.
+   *
+   * This exists because the measurement said the threshold matters more than anything else about the
+   * layer. On the held-out evaluation set the offline provider reaches 50% recall at 14% false
+   * escalation under `balanced` and 0% at 0% under `conservative` — the signal is there, and a
+   * provider that hedges on unfamiliar phrasing loses all of it to the stricter rule. Which is right
+   * depends on how well a given provider's confidence is calibrated, and that is a property of the
+   * provider, not something this file can know. So it is a setting with a safe default, not a
+   * constant tuned until a benchmark looked good.
+   */
+  export type Sensitivity = "conservative" | "balanced"
+
+  function sensitivity(): Sensitivity {
+    return process.env["KILO_SECURITY_AUTO_CLASSIFIER_SENSITIVITY"] === "balanced" ? "balanced" : "conservative"
+  }
+
+  /**
    * Turn a verdict into evidence, conservatively.
    *
    * The confidence label is the model's opinion of its own opinion, so it gates how far a verdict
@@ -159,7 +179,9 @@ export namespace SemanticEvidence {
    *
    * No threshold on a self-reported number. Three labels, three coarse outcomes.
    */
-  export function policy(verdict: Verdict): SecurityEvidence[] {
+  export function policy(verdict: Verdict, mode: Sensitivity = sensitivity()): SecurityEvidence[] {
+    if (verdict.risk === "SUSPICIOUS" && verdict.confidence === "MEDIUM" && mode === "balanced")
+      return [evidenceFor(verdict, false)]
     if (verdict.risk === "HIGH_RISK" && (verdict.confidence === "HIGH" || verdict.confidence === "MEDIUM"))
       return [evidenceFor(verdict, true)]
     if (verdict.risk === "HIGH_RISK") return [evidenceFor(verdict, false)]

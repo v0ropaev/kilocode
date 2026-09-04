@@ -152,13 +152,18 @@ export function render(input: SemanticInput, id: string): string {
  * a parser an attacker can write into — and the failure would be silent, because a wrong verdict
  * looks exactly like a right one.
  */
+/** Membership as a lookup, so a value only ever becomes a member by being found in the list. */
+function oneOf<T extends string>(values: readonly T[], value: string | undefined): T | undefined {
+  return values.find((item) => item === value)
+}
+
 export function parse(text: string): Verdict {
   const line = text.trim().split("\n")[0]?.trim() ?? ""
   const match = /^RISK=([A-Z_]+)\s+CATEGORY=([A-Z_]+)\s+CONFIDENCE=([A-Z]+)$/.exec(line)
   if (!match) return NO_SIGNAL
-  const [, risk, category, confidence] = match
-  if (!RISKS.includes(risk as Risk)) return NO_SIGNAL
-  if (!CATEGORIES.includes(category as Category)) return NO_SIGNAL
-  if (!CONFIDENCES.includes(confidence as Confidence)) return NO_SIGNAL
-  return { risk: risk as Risk, category: category as Category, confidence: confidence as Confidence }
+  const risk = oneOf(RISKS, match[1])
+  const category = oneOf(CATEGORIES, match[2])
+  const confidence = oneOf(CONFIDENCES, match[3])
+  if (!risk || !category || !confidence) return NO_SIGNAL
+  return { risk, category, confidence }
 }

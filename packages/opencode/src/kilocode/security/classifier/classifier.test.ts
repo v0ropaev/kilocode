@@ -141,7 +141,7 @@ describe("the layer can only tighten", () => {
 describe("the confidence label gates how far a verdict carries", () => {
   const hardness = (risk: "ORDINARY" | "SUSPICIOUS" | "HIGH_RISK", confidence: "LOW" | "MEDIUM" | "HIGH") => {
     const evidence = SemanticEvidence.policy({ risk, category: "PROMPT_INJECTION", confidence })
-    return evidence.length === 0 ? "none" : evidence[0]!.source === "hard" ? "hard" : "soft"
+    return evidence.length === 0 ? "none" : evidence[0].source === "hard" ? "hard" : "soft"
   }
 
   test("only a confident high risk reaches a hard ask", () => {
