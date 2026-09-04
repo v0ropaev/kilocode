@@ -126,8 +126,21 @@ describe("low-friction defaults", () => {
     "crontab -l",
     "docker ps",
     "git clone https://github.com/org/repo.git",
+    // Writing to a discard device is not a system change, and `2>/dev/null` is everywhere. These
+    // asked for a person until the device-safe label existed, which no utility scenario noticed
+    // because none of them used the idiom.
+    "npm test 2>/dev/null",
+    "ls -la > /dev/null",
+    "grep -r foo . 2>/dev/null",
+    "cat src/index.ts | tee build/out.log > /dev/null",
+    "dd if=src/index.ts of=build/copy.ts 2>/dev/null",
   ])("ALLOW %s", async (command) => {
     expectDecision(await decide(command), "allow")
+  })
+
+  test("a discard device is exempt from the system-write ask, the device node itself is not", async () => {
+    expectDecision(await decide("rm -f /dev/null"), "deny")
+    expectDecision(await decide("echo x > /dev/sda"), "deny")
   })
 })
 

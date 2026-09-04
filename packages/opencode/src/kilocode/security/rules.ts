@@ -230,7 +230,10 @@ export namespace SecurityRules {
               attrs,
             ),
           )
-        else if (mutating)
+        // Writing *to* a discard device is not a system change: `2>/dev/null` is one of the most
+        // common things a shell command does, and the data goes nowhere. Deleting or replacing the
+        // device node itself is still a system change and still falls to the branch above.
+        else if (mutating && !target.labels.includes("device-safe"))
           out.push(
             hard("hard.fs.system-write", "ask", "SYSTEM_MODIFICATION", "The operation modifies system files.", attrs),
           )

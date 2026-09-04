@@ -133,15 +133,15 @@ const advisorySection = advisory.length
       "",
       "## LLM advisory cost (opt-in layer)",
       "",
-      "| Configuration | Model calls | Calls per attack step | Flagged | Errors | Timeouts | Advisory p50 | Advisory p95 |",
-      "| --- | --: | --: | --: | --: | --: | --: | --: |",
+      "| Configuration | Considered | Model calls | Calls per decision | Flagged | Errors | Timeouts | Advisory p50 | Advisory p95 |",
+      "| --- | --: | --: | --: | --: | --: | --: | --: | --: |",
       ...advisory.map(([config, stats]) => {
         const sorted = [...stats.latencies].sort((a, b) => a - b)
         const q = (p: number) =>
           sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))]! : 0
         const decisions = results.filter((r) => r.config === config).reduce((n, r) => n + r.decisions.length, 0)
         const rate = decisions > 0 ? (stats.calls / decisions).toFixed(2) : "n/a"
-        return `| ${config} | ${stats.calls} | ${rate} | ${stats.risky} | ${stats.errors} | ${stats.timeouts} | ${q(50).toFixed(2)} ms | ${q(95).toFixed(2)} ms |`
+        return `| ${config} | ${stats.considered} | ${stats.calls} | ${rate} | ${stats.flagged} | ${stats.errors} | ${stats.timeouts} | ${q(50).toFixed(2)} ms | ${q(95).toFixed(2)} ms |`
       }),
       "",
       `_Provider: ${process.env["KILO_SECURITY_AUTO_CLASSIFIER_PROVIDER"] ?? "heuristic"}._`,

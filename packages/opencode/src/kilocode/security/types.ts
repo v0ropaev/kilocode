@@ -71,6 +71,8 @@ export type PathLabel =
   | "kilo-config"
   | "kilo-state"
   | "device"
+  /** A device that discards or synthesises data (`/dev/null`, `/dev/zero`, a tty, a pipe fd). */
+  | "device-safe"
   | "glob"
   | "workspace-ancestor"
 
