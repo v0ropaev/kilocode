@@ -38,7 +38,7 @@ import * as Tool from "@/tool/tool"
 import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
 import { Schema } from "effect"
-import { ClassifierAdvisory } from "@/kilocode/security/classifier/layers"
+import { SemanticEvidence } from "@/kilocode/security/classifier/layers"
 import { SecurityGate } from "@/kilocode/security/gate"
 import { SecurityKeys } from "@/kilocode/security/keys"
 import { PackageMetadata } from "@/kilocode/security/package/metadata"
@@ -772,9 +772,9 @@ export namespace BenchHarness {
    * that timed out or failed leaves no trace in a decision, and "the model was asked and said
    * nothing" has to be distinguishable from "the model was never asked".
    */
-  const classifierCost = new Map<BenchConfig, ClassifierAdvisory.Stats>()
+  const classifierCost = new Map<BenchConfig, SemanticEvidence.Stats>()
 
-  export function classifierStats(): ReadonlyMap<BenchConfig, ClassifierAdvisory.Stats> {
+  export function classifierStats(): ReadonlyMap<BenchConfig, SemanticEvidence.Stats> {
     return classifierCost
   }
 
@@ -793,10 +793,10 @@ export namespace BenchHarness {
       }
     }
     // Sequential: fair latency, and no races on the shared collector / PATH / decision observer.
-    ClassifierAdvisory.reset()
+    SemanticEvidence.reset()
     return Effect.forEach(jobs, runOne, { concurrency: 1 }).pipe(
       Effect.provide(registryLayer(input.config)),
-      Effect.tap(() => Effect.sync(() => classifierCost.set(input.config, ClassifierAdvisory.snapshot()))),
+      Effect.tap(() => Effect.sync(() => classifierCost.set(input.config, SemanticEvidence.snapshot()))),
     )
   }
 

@@ -23,7 +23,7 @@ import { PackageRiskEvaluator } from "./package/evaluator"
 import { SecuritySessionState } from "./state/store"
 import { EgressGuard } from "./state/egress"
 import { SecretContent } from "./state/content"
-import { ClassifierAdvisory } from "./classifier/layers"
+import { SemanticEvidence } from "./classifier/layers"
 import { defaultProvider as classifierProvider } from "./classifier/provider"
 import { ToolAuthority } from "./tool/authority"
 import { ToolCapability } from "./tool/capability"
@@ -400,13 +400,13 @@ export namespace SecurityGate {
           if (callID !== undefined) SecuritySessionState.recordPending(input.sessionID, callID, authority.pending)
           decision = SecurityEngine.extend(decision, authority.evidence)
         }
-        if (layers.classifier && ClassifierAdvisory.considers(decision, action)) {
+        if (layers.classifier && SemanticEvidence.considers({ decision, action, sessionID: input.sessionID })) {
           // Last, and only for what the deterministic layers left unsettled. It travels through the
           // same monotone reducer as every other layer, which is what makes "the model cannot open
           // anything up" a property of the fold rather than a promise in a comment.
-          const advisory = yield* ClassifierAdvisory.assess({
+          const advisory = yield* SemanticEvidence.assess({
             provider: classifierProvider(),
-            summary: ClassifierAdvisory.summarize(action, SecuritySessionState.hasSecretContext(input.sessionID)),
+            summary: SemanticEvidence.summarize(action, input.sessionID),
             timeoutMs: SecurityFlag.classifierTimeoutMs(),
           })
           decision = SecurityEngine.extend(decision, advisory)
@@ -500,6 +500,50 @@ export namespace SecurityGate {
   }
 
   /**
+   * Where the text a completed call returned actually came from — who wrote the words, not what kind
+   * of resource the path names.
+   *
+   * The deterministic layers never ask this. To the path classifier a project README, a dependency's
+   * README and a saved web page are all "ordinary workspace content"; all three are written by
+   * somebody who is not the user, and that is the only fact that matters for indirect injection.
+   *
+   * Returns nothing when the call's output cannot be attributed to a source. A bash command whose
+   * read targets are unknown is not recorded: an unattributable excerpt would inflate the semantic
+   * layer's call rate without telling it anything about provenance.
+   */
+  function ingestSource(input: {
+    tool: string
+    provenance: ToolProvenance | undefined
+    candidates: { canonical: string }[]
+  }): { source: SecuritySessionState.ContentSource; name: string } | undefined {
+    if (input.provenance === "mcp-local" || input.provenance === "mcp-remote")
+      return { source: "mcp", name: input.tool }
+    if (input.tool === "webfetch" || input.tool === "websearch") return { source: "web", name: input.tool }
+    // Exactly one: with several reads in one call the excerpt cannot be attributed to either.
+    const only = input.candidates.length === 1 ? input.candidates[0]!.canonical : undefined
+    if (only === undefined) {
+      if (input.provenance === "workspace" || input.provenance === "plugin") return { source: "tool", name: input.tool }
+      return undefined
+    }
+    const lower = only.toLowerCase()
+    const name = only.split(/[\\/]/).at(-1) ?? only
+    const source: SecuritySessionState.ContentSource = lower.includes("/node_modules/")
+      ? "dependency"
+      : lower.endsWith(".ipynb")
+        ? "notebook"
+        : lower.includes("/.kilocode/skills/") || name.toUpperCase() === "SKILL.MD"
+          ? "skill"
+          : lower.includes("/.github/workflows/") ||
+              lower.includes("/.circleci/") ||
+              /^(dockerfile|makefile|\.gitlab-ci\.yml|docker-compose\.ya?ml)$/i.test(name)
+            ? "ci-config"
+            : /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|rb|php|c|h|cc|cpp|swift|kt|scala)$/i.test(lower)
+              ? "source-comment"
+              : "workspace-file"
+    return { source, name }
+  }
+
+  /**
    * Classify the content a completed call actually returned. A session becomes
    * sensitive from *observed* content, never from a filename and never from a refused request, so this
    * runs only on the success path with the output the agent really received.
@@ -555,6 +599,16 @@ export namespace SecurityGate {
         const observed = input.options.layers.content
           ? observeContent({ text: output, tool: input.tool, sessionID, callID })
           : undefined
+        if (input.options.layers.classifier && output) {
+          // Remember *what the agent was told*, not just what it obtained. Bounded, attributed, and
+          // recorded only on the success path — text from a refused call was never read.
+          const attributed = ingestSource({
+            tool: input.tool,
+            provenance: input.invocation?.descriptor.provenance,
+            candidates: SecuritySessionState.pendingCandidates(sessionID, callID),
+          })
+          if (attributed) SecuritySessionState.recordIngested(sessionID, { ...attributed, excerpt: output })
+        }
         SecuritySessionState.commit(sessionID, callID, secretSource, observed)
       })
     // Tool-id shadowing: a workspace or plugin tool may call itself `read` or `list`. The envelope is
@@ -616,6 +670,12 @@ export namespace SecurityGate {
         const observed = input.options.layers.content
           ? observeContent({ text: output, tool: input.tool, sessionID, callID })
           : undefined
+        if (input.options.layers.classifier && output) {
+          // Remember *what the agent was told*, not just what it obtained. Bounded, attributed, and
+          // recorded only on the success path — text from a refused call was never read.
+          // A delegated result is untrusted by construction: it was produced outside Kilo.
+          SecuritySessionState.recordIngested(sessionID, { source: "mcp", name: input.tool, excerpt: output })
+        }
         SecuritySessionState.commit(sessionID, callID, secretSource, observed)
       })
     return effect.pipe(

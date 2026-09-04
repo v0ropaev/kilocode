@@ -21,6 +21,7 @@ import { KiloReadObject } from "@/kilocode/tool/read-object" // kilocode_change
 import { isInterrupted } from "@/kilocode/effect/cause" // kilocode_change
 import * as SandboxPolicy from "@/kilocode/sandbox/policy" // kilocode_change
 import { SecurityGate } from "@/kilocode/security/gate" // kilocode_change
+import { SecuritySessionState } from "@/kilocode/security/state/store" // kilocode_change
 import { CommandTimeout } from "@/kilocode/command-timeout" // kilocode_change
 import { Suggestion } from "@/kilocode/suggestion" // kilocode_change
 import { Question } from "@/question" // kilocode_change
@@ -1570,10 +1571,22 @@ export const layer = Layer.effect(
           KiloSessionMessageOrder.compare(latest.userMessage, latest.assistantMessage) < 0
         // kilocode_change end
         // kilocode_change start - carry local review command marker into LLM telemetry
+        const lastUserParts = msgs.findLast((m) => m.info.role === "user" && m.info.id === lastUser.id)?.parts ?? []
         const telemetry =
-          KiloSessionProcessor.extractReviewTelemetry(
-            msgs.findLast((m) => m.info.role === "user" && m.info.id === lastUser.id)?.parts ?? [],
-          ) ?? KiloSessionProcessor.extractSuggestionReviewTelemetry(lastAssistantMsg?.parts ?? [])
+          KiloSessionProcessor.extractReviewTelemetry(lastUserParts) ??
+          KiloSessionProcessor.extractSuggestionReviewTelemetry(lastAssistantMsg?.parts ?? [])
+        // kilocode_change end
+        // kilocode_change start - Security Auto Mode: what the user asked for, in the user's own
+        // words, for the semantic layer to compare an action against. Evidence about intent and
+        // never authority — a request that names a dangerous action does not permit it, it only
+        // makes the mismatch signal quieter. Bounded and stored in memory by the session state.
+        SecuritySessionState.recordGoal(
+          sessionID,
+          lastUserParts
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+            .join("\n"),
+        )
         // kilocode_change end
 
         // Some providers return "stop" even when the assistant message contains

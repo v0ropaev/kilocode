@@ -1,118 +1,183 @@
 /**
- * The LLM advisory layer.
+ * The semantic security layer.
  *
  * Security Auto Mode's authority is the deterministic engine. This layer is a *witness*: it looks at
- * an action the engine could not settle and may say "this still looks like data leaving the machine".
- * What it says never becomes a decision on its own — it becomes one more piece of evidence, folded
- * through the same monotone reducer every other layer uses.
+ * a decision the engine could not settle and may say "the text that led here was telling the agent to
+ * do this". What it says never becomes a decision on its own — it becomes one more piece of evidence,
+ * folded through the same monotone reducer every other layer uses.
  *
- * That is the whole design, and it is why the invariants are not a list of `if` statements here:
+ * That is the whole design, and it is why the invariants are not a list of `if` statements:
  *
  *   `Decision.reduce` folds evidence with `stricter()`, starting from ALLOW. Appending evidence can
- *   move a decision towards ASK or DENY and can never move it back. So a layer that only ever
- *   *appends* is, structurally, incapable of relaxing anything.
+ *   move a decision towards ASK or DENY and can never move it back. A layer that only ever *appends*
+ *   is, structurally, incapable of relaxing anything.
  *
  * Concretely, and provably rather than by convention:
  *   - a deterministic DENY stays DENY, whatever the model says;
  *   - a hard ASK stays a hard ASK;
  *   - the model can never produce ALLOW, because ALLOW is the identity of the fold, not a value this
- *     layer can contribute;
+ *     layer can contribute. `BENIGN_CONTEXT` is in the vocabulary so the model has somewhere to put
+ *     "I looked and this is fine", and it maps to no evidence at all — the only representation of a
+ *     benign verdict that cannot be turned into permission;
  *   - the model can never produce DENY either. It contributes an ASK. A layer whose input is a model
- *     is not allowed to end a task on its own judgement; it is allowed to insist on a human.
+ *     may insist on a person; it may not end the task on its own judgement.
  *
- * The predecessor of this file returned a `Decision` and mapped `soft-ask + model says fine` to
- * ALLOW. That is the one shape the project's premise rules out — it makes the model load-bearing for
- * *permission*, so a repository that can talk to the model can talk its way out of an ask. It is
- * gone, together with the "does this match the user's request?" question that motivated it: the
- * user's request is not an input the security gate has (see `SecurityGate.evaluate`), so that
- * question could only ever have been answered from invented data.
+ * What changed from the action-only version: that one judged the command. It caught an upload whose
+ * *file name* looked like a secret and missed every case where the secret was staged through a file
+ * called `staged.dat` first — because the name is all it had. This one is given the untrusted text
+ * the session actually read, which is where the meaning was the whole time.
  */
 import { Effect } from "effect"
 import { Decision } from "../decision"
+import { SecuritySessionState } from "../state/store"
 import type { NormalizedAction, SecurityDecision, SecurityEvidence } from "../types"
-import type { ActionSummary, ClassifierProvider } from "./provider"
+import type { ClassifierProvider } from "./provider"
+import { NO_SIGNAL, type SemanticInput, type Verdict } from "./schema"
 
-export namespace ClassifierAdvisory {
+export namespace SemanticEvidence {
   /** Counters for the ablation: cost and reliability are reported, never inferred. */
   export interface Stats {
     calls: number
-    risky: number
+    flagged: number
     errors: number
     timeouts: number
+    considered: number
     latencies: number[]
+    byCategory: Record<string, number>
   }
 
-  const stats: Stats = { calls: 0, risky: 0, errors: 0, timeouts: 0, latencies: [] }
+  const stats: Stats = {
+    calls: 0,
+    flagged: 0,
+    errors: 0,
+    timeouts: 0,
+    considered: 0,
+    latencies: [],
+    byCategory: {},
+  }
 
   export function snapshot(): Stats {
-    return { ...stats, latencies: [...stats.latencies] }
+    return { ...stats, latencies: [...stats.latencies], byCategory: { ...stats.byCategory } }
   }
+
   export function reset() {
     stats.calls = 0
-    stats.risky = 0
+    stats.flagged = 0
     stats.errors = 0
     stats.timeouts = 0
+    stats.considered = 0
     stats.latencies = []
+    stats.byCategory = {}
   }
 
   /**
-   * The band the advisory is allowed to look at: cases the deterministic layers did *not* settle.
+   * Routing: which decisions are even eligible for a model call.
    *
-   * A DENY is settled. A hard ASK is settled — it already stops an autonomous run, so a model call
-   * could only add latency. What is left is ALLOW and soft ASK, and of those only the actions that
-   * put data on the network: everything else is ordinary local work the engine already understands,
-   * and paying a model round-trip for it would be the "call the LLM on every action" design the
-   * deterministic core exists to avoid.
+   * Three conditions, all required. A DENY or a hard ASK is settled — the engine already stopped the
+   * action, and a model call could only add latency. The action has to actually move data outward or
+   * run through delegated authority — an `ls` is not a semantics problem. And the session has to have
+   * read something untrusted, or have a recorded goal to compare against: with neither, there is no
+   * semantic question to ask, only a command, and the engine reads commands better than a model does.
    */
-  export function considers(decision: SecurityDecision, action: NormalizedAction): boolean {
+  export function considers(input: {
+    decision: SecurityDecision
+    action: NormalizedAction
+    sessionID: string
+  }): boolean {
+    const { decision, action } = input
     if (decision.action === "deny") return false
     if (decision.action === "ask" && decision.hard) return false
-    if (action.kind !== "shell") return false
-    return action.command.commands.some((process) => process.network)
+    const interesting =
+      (action.kind === "shell" && action.command.commands.some((process) => process.network)) ||
+      (action.kind === "permission" && action.permission.startsWith("mcp"))
+    if (!interesting) return false
+    const hasContext =
+      SecuritySessionState.ingestedOf(input.sessionID).length > 0 ||
+      SecuritySessionState.goalOf(input.sessionID) !== undefined
+    if (!hasContext) return false
+    stats.considered += 1
+    return true
   }
 
-  /** Structured, path-free description of the action. Returns undefined when there is nothing to judge. */
-  export function summarize(action: NormalizedAction, readSecret: boolean): ActionSummary | undefined {
+  /** Assemble what the model is shown. Structure and bounded excerpts; never a command line. */
+  export function summarize(action: NormalizedAction, sessionID: string): SemanticInput | undefined {
+    const readSecret = SecuritySessionState.hasSecretContext(sessionID)
+    const provenance = SecuritySessionState.ingestedOf(sessionID).map((item) => ({
+      source: item.source,
+      name: item.name,
+      excerpt: item.excerpt,
+    }))
+    const goal = SecuritySessionState.goalOf(sessionID)
+    if (action.kind === "permission")
+      return {
+        action: { network: false, delegated: action.permission, readSecret, operands: [] },
+        provenance,
+        ...(goal ? { goal } : {}),
+      }
     if (action.kind !== "shell") return undefined
     const process = action.command.commands.find((item) => item.network)
     if (!process) return undefined
     return {
-      ...(process.executable !== undefined ? { executable: process.executable } : {}),
-      network: true,
-      ...(process.effect !== undefined ? { effect: process.effect } : {}),
-      readSecret,
-      operands: process.operands.map((operand) => ({
-        // Basename only: the directory layout carries the user's identity and none of the meaning.
-        basename: operand.path.canonical.split("/").pop() ?? "",
-        relation: operand.path.relation,
-        labels: operand.path.labels,
-        effect: operand.effect,
-      })),
+      action: {
+        ...(process.executable !== undefined ? { executable: process.executable } : {}),
+        network: true,
+        ...(process.effect !== undefined ? { effect: process.effect } : {}),
+        readSecret,
+        operands: process.operands.map((operand) => ({
+          // Basename only: the directory carries the user's identity and none of the meaning.
+          basename: operand.path.canonical.split("/").pop() ?? "",
+          relation: operand.path.relation,
+          labels: operand.path.labels,
+          effect: operand.effect,
+        })),
+      },
+      provenance,
+      ...(goal ? { goal } : {}),
     }
   }
 
-  const EVIDENCE: SecurityEvidence = Decision.evidence({
-    rule: "advisory.classifier.egress",
-    // `hard` so the ask survives a permissive rule and stops an unattended run. It is still an ASK:
-    // the layer asks for a person, it does not decide for them.
-    source: "hard",
-    action: "ask",
-    reasonCode: "NETWORK_EGRESS",
-    message: "An advisory review flagged this outbound action for a person to confirm.",
-    attributes: { advisory: true },
-  })
+  function evidenceFor(verdict: Verdict, hard: boolean): SecurityEvidence {
+    return Decision.evidence({
+      rule: hard ? "advisory.semantic.escalate" : "advisory.semantic.flag",
+      // `hard` survives a permissive rule and stops an unattended run. Still an ASK either way: the
+      // layer asks for a person, it does not decide for them.
+      source: hard ? "hard" : "default",
+      action: "ask",
+      reasonCode: verdict.category === "USER_GOAL_MISMATCH" ? "UNCLASSIFIED_ACTION" : "NETWORK_EGRESS",
+      message: "A semantic review flagged this outbound action for a person to confirm.",
+      attributes: { advisory: true, category: verdict.category, confidence: verdict.confidence },
+    })
+  }
 
   /**
-   * Ask the advisory about one action. Yields evidence to fold, or nothing at all.
+   * Turn a verdict into evidence, conservatively.
+   *
+   * The confidence label is the model's opinion of its own opinion, so it gates how far a verdict
+   * carries and never stands alone: only `HIGH_RISK` reaches a hard ask, and only when the model is
+   * not hedging. Everything softer contributes a soft ask, which changes what a person sees without
+   * stopping an unattended run. `ORDINARY` — including `BENIGN_CONTEXT` — contributes nothing.
+   *
+   * No threshold on a self-reported number. Three labels, three coarse outcomes.
+   */
+  export function policy(verdict: Verdict): SecurityEvidence[] {
+    if (verdict.risk === "HIGH_RISK" && (verdict.confidence === "HIGH" || verdict.confidence === "MEDIUM"))
+      return [evidenceFor(verdict, true)]
+    if (verdict.risk === "HIGH_RISK") return [evidenceFor(verdict, false)]
+    if (verdict.risk === "SUSPICIOUS" && verdict.confidence === "HIGH") return [evidenceFor(verdict, false)]
+    return []
+  }
+
+  /**
+   * Ask the layer about one action. Yields evidence to fold, or nothing at all.
    *
    * Every failure path yields nothing: no provider, a timeout, a transport error, an answer outside
-   * the vocabulary. "Nothing" means the deterministic decision stands exactly as it was — which is
-   * the same behaviour as running with the layer switched off. That is the property the frozen
-   * guarantee rests on: this layer can add friction, and its absence can never add risk.
+   * the vocabulary. "Nothing" means the deterministic decision stands exactly as it was — the same
+   * behaviour as running with the layer switched off. That is the property the frozen guarantee rests
+   * on: this layer can add friction, and its absence can never add risk.
    */
-  export const assess = Effect.fn("ClassifierAdvisory.assess")(function* (input: {
+  export const assess = Effect.fn("SemanticEvidence.assess")(function* (input: {
     provider: ClassifierProvider | undefined
-    summary: ActionSummary | undefined
+    summary: SemanticInput | undefined
     timeoutMs: number
   }) {
     if (!input.provider || !input.summary) return [] as SecurityEvidence[]
@@ -122,10 +187,12 @@ export namespace ClassifierAdvisory {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), timeoutMs)
       try {
-        const verdict = await provider.classify(summary, controller.signal)
-        return { kind: "ok" as const, risky: verdict.risky }
+        return { kind: "ok" as const, verdict: await provider.classify(summary, controller.signal) }
       } catch {
-        return { kind: controller.signal.aborted ? ("timeout" as const) : ("error" as const), risky: false }
+        return {
+          kind: controller.signal.aborted ? ("timeout" as const) : ("error" as const),
+          verdict: NO_SIGNAL,
+        }
       } finally {
         clearTimeout(timer)
       }
@@ -134,8 +201,12 @@ export namespace ClassifierAdvisory {
     stats.latencies.push(performance.now() - started)
     if (outcome.kind === "timeout") stats.timeouts += 1
     if (outcome.kind === "error") stats.errors += 1
-    if (outcome.kind !== "ok" || !outcome.risky) return [] as SecurityEvidence[]
-    stats.risky += 1
-    return [EVIDENCE]
+    if (outcome.kind !== "ok") return [] as SecurityEvidence[]
+    const evidence = policy(outcome.verdict)
+    if (evidence.length > 0) {
+      stats.flagged += 1
+      stats.byCategory[outcome.verdict.category] = (stats.byCategory[outcome.verdict.category] ?? 0) + 1
+    }
+    return evidence
   })
 }
