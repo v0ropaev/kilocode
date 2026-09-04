@@ -395,6 +395,13 @@ describe("KiloSessionPrompt.askPermission with Security Auto Mode", () => {
       hard: true,
       reasonCode: "SENSITIVE_READ",
     })
+    // kilocode_change - the decision now arrives with a sentence a person can act on. Without this the
+    // prompt shows a rule id, and approving becomes a formality rather than a decision.
+    const summary = calls[0]?.metadata?.[SecurityKeys.META] as { explanation?: string }
+    expect(summary.explanation).toBeString()
+    expect(summary.explanation).toContain("credential material")
+    expect(summary.explanation).not.toContain("SENSITIVE_READ")
+    expect(summary.explanation).not.toContain(home)
     const read = {
       sessionID: session.id,
       permission: "read",

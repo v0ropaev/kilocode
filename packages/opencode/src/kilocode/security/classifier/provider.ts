@@ -17,6 +17,14 @@ import { NO_SIGNAL, SYSTEM_PROMPT, nonce, parse, render, type SemanticInput, typ
 export interface ClassifierProvider {
   readonly name: string
   classify(input: SemanticInput, signal: AbortSignal): Promise<Verdict>
+  /**
+   * Optional: rewrite a security notice into one plain sentence for a person to read.
+   *
+   * Optional because the deterministic template is already the product. A provider that does not
+   * implement this simply leaves the template in place — which is what the offline stand-in does,
+   * since a regex has nothing to add to a sentence.
+   */
+  rewrite?(system: string, text: string, signal: AbortSignal): Promise<string>
 }
 
 /** Scripted provider for tests: answers from a queue, or the same verdict every time. */
@@ -141,6 +149,59 @@ function pluck(body: unknown, keys: Array<string | number>): string {
   return typeof node === "string" ? node.trim() : ""
 }
 
+/**
+ * The model Kilo is already configured with, through Kilo's own provider service.
+ *
+ * This is the backend a deployment should use. It hardcodes no vendor, needs no second key, and
+ * follows whatever the user already set up — including a local OpenAI-compatible server declared as a
+ * `provider` block in the Kilo config. It asks for the *small* model, the same one prompt enhancement
+ * and title generation use, because this is the same shape of job.
+ *
+ * Everything is behind `await import()`. The classifier subtree is otherwise a leaf — `schema.ts`
+ * imports `node:crypto` and nothing else — and a static import here would pull the provider service,
+ * the Effect layer graph and the AI SDK into every module that touches security, including its unit
+ * tests. It would also add an edge into a strongly-connected component whose members read
+ * `Plugin.node` and `Provider.node` at module-body time; that component has already produced a
+ * `Cannot access 'node' before initialization` in this project once. The deferral is the same pattern
+ * `kilocode/cli/cmd/roll-call.ts` uses, for the same reason.
+ */
+export function kiloBackend(): ModelBackend {
+  return {
+    name: "kilo:small-model",
+    async complete(system, user, maxTokens, signal) {
+      const [{ generateText }, { Provider }, { ProviderTransform }, { AppRuntime }, { Effect }] = await Promise.all([
+        import("ai"),
+        import("@/provider/provider"),
+        import("@/provider/transform"),
+        import("@/effect/app-runtime"),
+        import("effect"),
+      ])
+      const resolved = await AppRuntime.runPromise(
+        Provider.Service.use((service) =>
+          Effect.gen(function* () {
+            const ref = yield* service.defaultModel()
+            const model =
+              (yield* service.getSmallModel(ref.providerID)) ?? (yield* service.getModel(ref.providerID, ref.modelID))
+            return { model, language: yield* service.getLanguage(model) }
+          }),
+        ),
+      )
+      const result = await generateText({
+        model: resolved.language,
+        // Deterministic where the provider allows it: a security notice should not vary run to run.
+        temperature: resolved.model.capabilities.temperature ? 0 : undefined,
+        providerOptions: ProviderTransform.providerOptions(resolved.model, resolved.model.options),
+        maxRetries: 0,
+        abortSignal: signal,
+        maxOutputTokens: maxTokens,
+        system,
+        messages: [{ role: "user" as const, content: user }],
+      })
+      return result.text.trim()
+    },
+  }
+}
+
 export function anthropicBackend(opts: { model?: string; apiKey?: string } = {}): ModelBackend {
   const model = opts.model ?? "claude-haiku-4-5-20251001"
   const apiKey = opts.apiKey ?? process.env["ANTHROPIC_API_KEY"]
@@ -195,12 +256,19 @@ export class ModelProvider implements ClassifierProvider {
     // 24 tokens: enough for the one line, far too few for the model to argue with itself.
     return parse(await this.backend.complete(SYSTEM_PROMPT, render(input, id), 24, signal))
   }
+
+  /** The input here is a sentence this codebase wrote, not anything a repository controls. */
+  async rewrite(system: string, text: string, signal: AbortSignal): Promise<string> {
+    return this.backend.complete(system, text, 64, signal)
+  }
 }
 
 /** Build a provider from the environment. Returns `undefined` — never throws — when unconfigured. */
 export function providerFromEnv(): ClassifierProvider | undefined {
   const kind = (process.env["KILO_SECURITY_AUTO_CLASSIFIER_PROVIDER"] ?? "heuristic").toLowerCase()
   if (kind === "heuristic") return new HeuristicProvider()
+  // The model the user already configured. No second key, no vendor named here.
+  if (kind === "kilo") return new ModelProvider(kiloBackend())
   if (kind === "anthropic")
     return new ModelProvider(
       anthropicBackend({

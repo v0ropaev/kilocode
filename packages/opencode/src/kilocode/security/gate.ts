@@ -24,6 +24,7 @@ import { SecuritySessionState } from "./state/store"
 import { EgressGuard } from "./state/egress"
 import { SecretContent } from "./state/content"
 import { SemanticEvidence } from "./classifier/layers"
+import { RiskExplanation } from "./classifier/explain"
 import { defaultProvider as classifierProvider } from "./classifier/provider"
 import { ToolAuthority } from "./tool/authority"
 import { ToolCapability } from "./tool/capability"
@@ -87,6 +88,8 @@ export namespace SecurityGate {
     reasonCode: SecurityDecision["reasonCode"]
     message: string
     rules: string[]
+    /** One plain sentence for the person being asked. Presentation only. */
+    explanation?: string
   }
 
   /**
@@ -182,6 +185,7 @@ export namespace SecurityGate {
       reasonCode: decision.reasonCode,
       message: decision.message,
       rules: [...new Set(decision.evidence.map((item) => item.rule))],
+      ...(decision.explanation ? { explanation: decision.explanation } : {}),
     }
   }
 
@@ -342,6 +346,50 @@ export namespace SecurityGate {
   })
 
   /** Evaluate a permission request. Never fails: any internal error is a hard ASK. */
+  /**
+   * The sanitized record an explanation is written from.
+   *
+   * It names the operand the decision is *about* — the one whose classification is least ordinary —
+   * by base name only, plus the class of place it lives in. No command line, no directory, no
+   * contents. A model shown this cannot disclose anything it was not shown.
+   */
+  function explanationFacts(
+    decision: SecurityDecision,
+    action: NormalizedAction,
+    sessionID: string,
+  ): RiskExplanation.Facts {
+    const operands =
+      action.kind === "shell"
+        ? action.command.commands.flatMap((process) => process.operands)
+        : action.kind === "file"
+          ? action.paths.map((value) => ({ path: value, effect: action.effect }))
+          : []
+    // Prefer a labelled or non-workspace operand: that is what the decision is usually about.
+    const chosen =
+      operands.find((operand) => operand.path.labels.length > 0) ??
+      operands.find((operand) => operand.path.relation !== "workspace") ??
+      operands[0]
+    const store =
+      chosen && chosen.path.relation === "home-sensitive"
+        ? chosen.path.canonical
+            .split("/")
+            .find((part) => part.startsWith(".") && part.length > 1)
+            ?.slice(1)
+            .toLowerCase()
+        : undefined
+    const semantic = decision.evidence.find((item) => item.rule.startsWith("advisory.semantic."))
+    return {
+      reasonCode: decision.reasonCode,
+      decision: decision.action,
+      hard: decision.hard,
+      ...(chosen ? { subject: chosen.path.canonical.split("/").pop() ?? "", relation: chosen.path.relation } : {}),
+      ...(store ? { store } : {}),
+      network: action.kind === "shell" && action.command.commands.some((process) => process.network),
+      readSecret: SecuritySessionState.hasSecretContext(sessionID),
+      ...(typeof semantic?.attributes?.["category"] === "string" ? { semantic: semantic.attributes["category"] } : {}),
+    }
+  }
+
   export const evaluate = Effect.fn("SecurityGate.evaluate")(function* (input: {
     request: Request
     options: Options
@@ -411,6 +459,17 @@ export namespace SecurityGate {
           })
           decision = SecurityEngine.extend(decision, advisory)
         }
+        // The decision is final here. What follows is presentation: a sentence for whoever is about
+        // to be asked. It reads the decision and writes nothing back into it.
+        if (decision.action !== "allow")
+          decision = {
+            ...decision,
+            explanation: yield* RiskExplanation.generate({
+              provider: layers.classifier ? classifierProvider() : undefined,
+              facts: explanationFacts(decision, action, input.sessionID),
+              timeoutMs: SecurityFlag.classifierTimeoutMs(),
+            }),
+          }
         return decision
       }),
     )
