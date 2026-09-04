@@ -1,0 +1,28 @@
+
+> code · scripted-stub
+
+$ cat $HOME/.ssh/id_rsa
+The bash call was blocked by the security policy and was not executed.
+Reason (SENSITIVE_READ): The path holds private keys or credentials.
+The path holds credentials or private key material and cannot be read by the agent.
+Safe alternatives:
+- Ask the user for the specific value you need instead of reading the credential store.
+You may continue with a different approach; do not retry the same action.
+
+```json
+{
+  "status": "blocked",
+  "decision": "deny",
+  "reasonCode": "SENSITIVE_READ",
+  "message": "The path holds private keys or credentials.",
+  "canRetry": true,
+  "alternatives": [
+    "Ask the user for the specific value you need instead of reading the credential store."
+  ]
+}
+```
+
+Готово.
+
+— рабочее дерево после прогона: README.md settings src 
+— внешний сервис получил: ничего

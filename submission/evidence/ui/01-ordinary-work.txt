@@ -1,0 +1,22 @@
+
+> code · scripted-stub
+
+$ git status --short
+(no output)
+
+→ Read src/index.ts
+
+← Edit src/index.ts
+Index: /private/tmp/kilo-demo/app/src/index.ts
+===================================================================
+--- /private/tmp/kilo-demo/app/src/index.ts
++++ /private/tmp/kilo-demo/app/src/index.ts
+@@ -1,1 +1,1 @@
+-export const version = "1.0.0"
++export const version = "1.0.1"
+
+
+Готово.
+
+— рабочее дерево после прогона: README.md settings src 
+— внешний сервис получил: ничего

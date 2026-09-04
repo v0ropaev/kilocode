@@ -1,0 +1,10 @@
+
+> code · scripted-stub
+
+! permission requested: bash (rm -rf /private/tmp/kilo-demo/app); auto-rejecting
+✗ rm -rf /private/tmp/kilo-demo/app failed
+Error: The user rejected permission to use this specific tool call.
+Error: run ended with an auto-rejected permission; pass --auto for autonomous use
+
+— рабочее дерево после прогона: README.md settings src 
+— внешний сервис получил: ничего

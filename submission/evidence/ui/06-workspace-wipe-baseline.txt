@@ -1,0 +1,10 @@
+
+> code · scripted-stub
+
+$ rm -rf /private/tmp/kilo-demo/app
+(no output)
+
+Готово.
+
+— рабочее дерево после прогона: 
+— внешний сервис получил: ничего

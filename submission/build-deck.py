@@ -96,13 +96,14 @@ COL2_W = 4.229
 YEAR = "2026"
 
 # ---------------------------------------------------------------- layout checker
-# LibreOffice substitutes the embedded Inter with Arial / Arial Black, which are WIDER than Inter.
-# Measuring against that substitution is the pessimistic case: what fits here fits in PowerPoint.
+# LibreOffice cannot read the template's embedded Inter and falls back to Arial, which is wider than
+# Inter at every weight. Measuring against that substitution is the pessimistic case: what fits in the
+# rendered PDF also fits in PowerPoint, where the embedded font is used.
 from PIL import ImageFont  # noqa: E402
 
 _FONTDIR = "/System/Library/Fonts/Supplemental/"
 _SUBST = {
-    ("Inter", True): _FONTDIR + "Arial Black.ttf",
+    ("Inter", True): _FONTDIR + "Arial Bold.ttf",
     ("Inter", False): _FONTDIR + "Arial.ttf",
     ("Arial", True): _FONTDIR + "Arial Bold.ttf",
     ("Arial", False): _FONTDIR + "Arial.ttf",
@@ -126,9 +127,10 @@ def _font(name, bold, size_pt):
 
 # A rendered line is taller than size*line: the renderer multiplies the font's own line height
 # (ascent + descent + gap, ~1.17 em for Arial) by the spacing factor. And it breaks lines slightly
-# earlier than PIL's advance widths suggest. Both are compensated here so the check stays pessimistic.
+# earlier than PIL's advance widths suggest — measurably so for the bold display face. Both are
+# compensated here so the check stays pessimistic.
 LINE_FACTOR = 1.17
-WIDTH_FACTOR = 0.97
+WIDTH_FACTOR = 0.92
 
 
 def measure(txt, size_pt, name, bold, width_in, line=1.2, space_pt=0):
@@ -262,8 +264,14 @@ def text(slide, x, y, w, h, lines, size=12, bold=False, color=BLACK, font=ARIAL,
     return box
 
 
-def rect(slide, x, y, w, h, fill=None, lineclr=None, linew=0.75, shape=MSO_SHAPE.RECTANGLE):
+def rect(slide, x, y, w, h, fill=None, lineclr=None, linew=0.75, shape=MSO_SHAPE.RECTANGLE,
+         quiet=False):
     s = slide.shapes.add_shape(shape, Inches(x), Inches(y), Inches(w), Inches(h))
+    # Drop the theme style reference the autoshape is born with: it carries an outline glow that the
+    # renderer paints around the shape's own text. Fill, line and text colour are set explicitly below.
+    style = s._element.find("{http://schemas.openxmlformats.org/presentationml/2006/main}style")
+    if style is not None:
+        s._element.remove(style)
     if fill is None:
         s.fill.background()
     else:
@@ -280,7 +288,8 @@ def rect(slide, x, y, w, h, fill=None, lineclr=None, linew=0.75, shape=MSO_SHAPE
     s.text_frame.margin_top = s.text_frame.margin_bottom = Inches(0.04)
     s.text_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
     s.text_frame.paragraphs[0].alignment = PP_ALIGN.LEFT
-    note(x, y, w, h, h, "<shape>", kind="shape")
+    if not quiet:
+        note(x, y, w, h, h, "<shape>", kind="shape")
     return s
 
 
@@ -294,6 +303,9 @@ def hline(slide, x, y, w, color=BLACK, width=0.75):
 def arrow(slide, x, y, w, color=GRAY):
     """A slim right-pointing arrow between flow boxes."""
     a = slide.shapes.add_shape(MSO_SHAPE.RIGHT_ARROW, Inches(x), Inches(y - 0.045), Inches(w), Inches(0.09))
+    style = a._element.find("{http://schemas.openxmlformats.org/presentationml/2006/main}style")
+    if style is not None:
+        a._element.remove(style)
     a.fill.solid()
     a.fill.fore_color.rgb = color
     a.line.fill.background()
@@ -355,19 +367,21 @@ def stat_row(slide, items, y, xs=None, w=None, numsize=26, blue=False):
     return bottom
 
 
-def cards(slide, items, y, xs, w, numcolor=BLUE, body_h=0.95, gap=0.232, size=12, foot_gap=0.10):
+def cards(slide, items, y, xs, w, numcolor=BLUE, body_h=0.95, gap=0.232, size=12, foot_gap=0.10,
+          footcolor=BLUE, footbold=True, footsize=None):
     """items: [(label, body)] or [(label, body, foot)]. Labels, bodies and feet are aligned across
     the row, so a longer column never drags its neighbours' baselines out of line."""
     lh = max([measure(i[0], size, INTER, False, w, 1.2) for i in items] + [0.20])
     yy = y + max(gap, lh + 0.03)
     bh = max([measure(i[1], size, ARIAL, False, w, 1.2) for i in items] + [body_h])
-    fh = max([measure(i[2], size - 1, INTER, True, w, 1.25) for i in items if len(i) > 2] + [0.0])
+    fs = footsize or (size - 1)
+    fh = max([measure(i[2], fs, INTER, footbold, w, 1.25) for i in items if len(i) > 2] + [0.0])
     for item, x in zip(items, xs):
         text(slide, x, y, w, lh, item[0], size=size, color=numcolor, font=INTER, space=0)
         text(slide, x, yy, w, bh, item[1], size=size, font=ARIAL, line=1.2, space=0)
         if len(item) > 2:
-            text(slide, x, yy + bh + foot_gap, w, fh, item[2], size=size - 1, bold=True,
-                 color=BLUE, font=INTER, line=1.25, space=0)
+            text(slide, x, yy + bh + foot_gap, w, fh, item[2], size=fs, bold=footbold,
+                 color=footcolor, font=INTER, line=1.25, space=0)
     LB[0] = yy + bh + (foot_gap + fh if fh else 0)
     return LB[0]
 
@@ -388,6 +402,124 @@ def footer_logos(slide, blue=False):
         pic(slide, media("partner_dark"), 2.288, 4.954, 1.832, 0.151)
 
 
+
+
+# ---------------------------------------------------------------- extra primitives
+
+TRACK = RGBColor(0xDD, 0xDD, 0xE3)
+UI_DIR = os.path.join(HERE, "evidence", "ui")
+
+
+def shot(slide, name, x, y, w, caption=None):
+    """Place a recorded terminal session. The height follows the image's own aspect ratio, so a
+    longer transcript can never silently overlap whatever comes next."""
+    path = os.path.join(UI_DIR, name)
+    if not os.path.isfile(path):
+        raise SystemExit(
+            f"interface capture {path} is missing.\n"
+            "Record and render them first:  bash submission/evidence/ui/capture-all.sh "
+            "&& bash submission/evidence/ui/render-all.sh"
+        )
+    top = y
+    if caption:
+        ch = max(measure(caption, 11, INTER, False, w, 1.2), 0.19)
+        text(slide, x, y, w, ch, caption, size=11, color=BLUE, font=INTER, space=0)
+        top = y + ch + 0.06
+    shape = slide.shapes.add_picture(path, Inches(x), Inches(top), width=Inches(w))
+    h = shape.height / 914400.0
+    note(x, top, w, h, h, f"<{name}>", kind="image")
+    LB[0] = top + h
+    return LB[0]
+
+
+def scorecard(slide, rows, y, namew=3.40, trackw=1.95, pitch=0.281):
+    """One line per kind of threat: how many attack runs reached real damage without the layer
+    (the whole grey track) and how many still do with it (the blue fill)."""
+    bx = M + namew + 0.12
+    for i, (name, done, total, status) in enumerate(rows):
+        yy = y + i * pitch
+        text(slide, M, yy - 0.020, namew, 0.20, name, size=10, font=ARIAL, space=0)
+        rect(slide, bx, yy, trackw, 0.125, fill=TRACK, quiet=True)
+        w = trackw * done / float(total)
+        if w > 0.005:
+            rect(slide, bx, yy, max(w, 0.028), 0.125, fill=BLUE, quiet=True)
+        text(slide, bx + trackw + 0.14, yy - 0.030, 0.98, 0.20, f"{done}/{total}", size=10, bold=True,
+             font=ARIAL, color=BLUE if done else BLACK, space=0)
+        text(slide, bx + trackw + 1.20, yy - 0.030, 1.72, 0.20, status, size=10, font=ARIAL,
+             color=GRAY, space=0)
+    LB[0] = y + len(rows) * pitch
+    return LB[0]
+
+
+def vchain(slide, steps, x, y, w, bh=0.56, gap=0.11):
+    """A top-down chain: each step narrows what the one above it allowed."""
+    for i, (head, sub) in enumerate(steps):
+        yy = y + i * (bh + gap)
+        r = rect(slide, x, yy, w, bh, fill=BLUE if i == 0 else None, lineclr=None if i == 0 else BLACK)
+        tf = r.text_frame
+        para(tf, head, 10.5, True, WHITE if i == 0 else BLACK, INTER, space=1, first=True)
+        para(tf, sub, 8.5, False, WHITE if i == 0 else GRAY, ARIAL, space=0)
+        if i < len(steps) - 1:
+            a = slide.shapes.add_shape(MSO_SHAPE.DOWN_ARROW, Inches(x + w / 2 - 0.05),
+                                       Inches(yy + bh + 0.025), Inches(0.10), Inches(gap - 0.05))
+            style = a._element.find("{http://schemas.openxmlformats.org/presentationml/2006/main}style")
+            if style is not None:
+                a._element.remove(style)
+            a.fill.solid()
+            a.fill.fore_color.rgb = GRAY
+            a.line.fill.background()
+            a.shadow.inherit = False
+    LB[0] = y + len(steps) * (bh + gap) - gap
+    return LB[0]
+
+
+def ladder(slide, y, x=M, w=8.958, h=1.05):
+    """The nine measured configurations, one bar each: every step switches on exactly one layer."""
+    vals = [100, 86, 68, 63, 52, 39, 30, 18, 6]
+    bw = (w - 8 * 0.07) / 9.0
+    for i, v in enumerate(vals):
+        bh = max(h * v / 100.0, 0.035)
+        xx = x + i * (bw + 0.07)
+        rect(slide, xx, y + h - bh, bw, bh, fill=BLUE if i == len(vals) - 1 else TRACK, quiet=True)
+        lab = text(slide, xx, y + h - bh - 0.20, bw, 0.18, f"{v} %", size=9,
+                   bold=(i == len(vals) - 1), color=BLUE if i == len(vals) - 1 else GRAY,
+                   font=ARIAL, space=0)
+        lab.text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
+    text(slide, x, y + h + 0.06, 1.8, 0.20, "без защиты · 100 %", size=9, color=GRAY, font=ARIAL, space=0)
+    p = text(slide, x + w - 2.4, y + h + 0.06, 2.4, 0.20, "все девять слоёв · 6 %", size=9, bold=True,
+             color=BLUE, font=ARIAL, space=0)
+    p.text_frame.paragraphs[0].alignment = PP_ALIGN.RIGHT
+    LB[0] = y + h + 0.26
+    return LB[0]
+
+
+def statement(slide, y, head, body, w=8.958):
+    """A boxed conclusion: the sentence the slide exists to make."""
+    hh = 0.26 + measure(head, 13, INTER, True, w - 0.46, 1.2) + 0.06 + \
+        measure(body, 11, ARIAL, False, w - 0.46, 1.25) + 0.20
+    r = rect(slide, M, y, w, hh, fill=None, lineclr=BLACK, linew=0.75)
+    tf = r.text_frame
+    tf.margin_left = tf.margin_right = Inches(0.23)
+    tf.margin_top = Inches(0.13)
+    tf.vertical_anchor = MSO_ANCHOR.TOP
+    para(tf, head, 13, True, BLACK, INTER, space=4, first=True)
+    para(tf, body, 11, False, BLACK, ARIAL, space=0, line=1.25)
+    LB[0] = y + hh
+    return LB[0]
+
+
+def qa_list(slide, items, x, y, w, pitch=0.86):
+    """Question, one-line answer, and the internal name of the layer in small grey type."""
+    for i, (q, a, tag) in enumerate(items):
+        yy = y + i * pitch
+        text(slide, x, yy, w, 0.21, q, size=11, color=BLUE, font=INTER, space=0)
+        ah = max(measure(a, 10, ARIAL, False, w, 1.2), 0.20)
+        text(slide, x, yy + 0.24, w, ah, a, size=10, font=ARIAL, line=1.2, space=0)
+        text(slide, x, yy + 0.27 + ah, w, 0.17, tag, size=8.5, color=GRAY, font=ARIAL, space=0)
+    LB[0] = y + len(items) * pitch
+    return LB[0]
+
+
 # ---------------------------------------------------------------- content
 
 
@@ -398,420 +530,346 @@ def build(prs):
          ["Security Auto Mode", "для Kilo Code"],
          size=32, bold=True, font=INTER, line=1.14, space=0)
     text(s, M, 3.520, 5.20, 0.30,
-         "Автономия coding agent без unrestricted authority",
+         "Агент работает сам. Права выдаёт не он.",
          size=13, bold=True, font=INTER, space=0)
-    text(s, M, 3.920, 5.20, 0.56,
-         ["Дмитрий Воропаев · архитектура, security engine, benchmark",
+    text(s, M, 3.920, 5.20, 0.78,
+         ["Дмитрий Воропаев · архитектура, движок решений, измерение",
           "AI Talent Hub · ИТМО"],
          size=12, font=INTER, color=GRAY, line=1.25, space=0)
     footer_logos(s)
     r = rect(s, 5.900, 1.220, 3.579, 3.100, fill=BLUE)
     tf = r.text_frame
     tf.margin_left = tf.margin_right = Inches(0.30)
-    para(tf, "Intent", 26, True, WHITE, INTER, space=0, line=1.1, first=True)
-    para(tf, "≠", 26, True, WHITE, INTER, space=0, line=1.1)
-    para(tf, "Authority", 26, True, WHITE, INTER, space=14, line=1.1)
-    para(tf, "Модель может быть скомпрометирована.", 12, False, WHITE, ARIAL, space=0, line=1.3)
-    para(tf, "Разрешение на действие принимает", 12, False, WHITE, ARIAL, space=0, line=1.3)
-    para(tf, "детерминированный слой вне модели.", 12, False, WHITE, ARIAL, space=0, line=1.3)
+    para(tf, "Намерение", 22, True, WHITE, INTER, space=0, line=1.12, first=True)
+    para(tf, "≠", 22, True, WHITE, INTER, space=0, line=1.12)
+    para(tf, "полномочия", 22, True, WHITE, INTER, space=5, line=1.12)
+    para(tf, "Intent ≠ Authority", 10, False, WHITE, ARIAL, space=13)
+    para(tf, "Моделью можно управлять со стороны.", 12, False, WHITE, ARIAL, space=0, line=1.3)
+    para(tf, "Поэтому решение о том, что агенту", 12, False, WHITE, ARIAL, space=0, line=1.3)
+    para(tf, "позволено, принимает не она.", 12, False, WHITE, ARIAL, space=0, line=1.3)
 
-    # ---------------------------------------------------------- 2. problem
+    # ---------------------------------------------------------- 2. the problem
     s = new_slide(prs)
-    y = title(s, "Автономия против approval fatigue")
-    y = lede(s, "Полезен только автономный агент. Оба доступных режима плохие.", y=y + 0.24)
+    y = title(s, "Подтверждать всё или отдать все права")
+    y = lede(s, "Агент полезен, когда работает сам. Оба доступных режима это ломают.", y=y + 0.20)
     y = cards(s, [
-        ("Режим 1 — подтверждать каждое действие",
-         "Человек читает десятки запросов подряд, перестаёт вчитываться и нажимает «разрешить» "
-         "автоматически. Автономия, ради которой агент и нужен, исчезает."),
-        ("Режим 2 — skip permissions",
-         "Агент получает полную authority на машине разработчика. На максимально автономном Kilo "
-         "100 % (237/237) прогонов атак доходят до наблюдаемого эффекта."),
-    ], y=y + 0.20, xs=COL2_X, w=COL2_W, body_h=0.55)
-    y = lede(s, "Опаснее всего, когда security-решение принимает та же модель.", y=y + 0.19, w=8.6)
+        ("Подтверждать всё",
+         "Человек читает десятки одинаковых запросов, перестаёт вчитываться и нажимает «разрешить» "
+         "не глядя. Самостоятельности не остаётся."),
+        ("Разрешить всё",
+         "Агент получает те же права, что и разработчик. На самом самостоятельном обычном Kilo до "
+         "настоящего вреда доходят все 237 прогонов атак из 237."),
+    ], y=y + 0.22, xs=COL2_X, w=COL2_W, body_h=0.55)
+    y = text(s, M, y + 0.20, 8.958, 0.24,
+             "Пользователи — разработчик, который уходит от экрана, и тимлид, решающий за команду.",
+             size=11, font=ARIAL, space=0) and below(0.20)
     stat_row(s, [
-        ("100 %", "успешных прогонов атак на baseline"),
-        ("81", "attack-сценарий, 49 utility"),
-        ("0", "внешних вызовов в решении"),
-        ("~1 мс", "p95 стоимости решения"),
-    ], y=y + 0.30)
+        ("237 / 237", "прогонов атак дошли до вреда без защиты"),
+        ("130", "сценариев: 81 атака, 49 обычных задач"),
+        ("3510", "прогонов в измерении"),
+        ("0", "обращений к модели при решении"),
+    ], y=y, numsize=22)
 
-    # ---------------------------------------------------------- 3. user & hypothesis
+    # ---------------------------------------------------------- 3. threat model
     s = new_slide(prs)
-    y = title(s, "Пользователь и продуктовая гипотеза")
+    y = title(s, "Считаем, что моделью можно управлять со стороны")
+    y = lede(s, "Разработчику доверяем. Его окружению и рассуждению модели — нет.", y=y + 0.20)
     y = cards(s, [
-        ("Основной пользователь",
-         "Разработчик, запускающий coding agent автономно. Успех — задача сделана без цепочки "
-         "подтверждений. Провал — удалённые файлы, утёкший ключ, установленный чужой пакет."),
-        ("Дополнительный пользователь",
-         "Engineering / security lead, который решает, можно ли вообще включить автономию в команде. "
-         "Ему нужны измеримые границы, а не обещание."),
-    ], y=y + 0.20, xs=COL2_X, w=COL2_W, body_h=0.55, size=11)
+        ("Доверяем",
+         "Разработчику и его задаче. Его личным настройкам Kilo. Коду самого Kilo. Механизму "
+         "изоляции операционной системы."),
+        ("Не доверяем",
+         "Рассуждению модели. Содержимому репозитория. Имени пакета, которое придумала модель. "
+         "Описаниям внешних инструментов. Коду проекта."),
+        ("Что из этого следует",
+         "Решение не зависит от того, распознала ли модель атаку. Его принимает отдельный слой, а "
+         "часть границ подтверждает операционная система."),
+    ], y=y + 0.22, xs=COL3_X, w=COL3_W, body_h=0.80, size=11)
+    statement(s, y + 0.26, "Намерение ≠ полномочия",
+              "Подсказка со стороны может изменить то, чего хочет модель. Изменить то, что ей "
+              "позволено, она не может.")
 
-    hy = y + 0.26
-    hh = 0.26 + measure("Если вынести authority control из LLM в детерминированный context-aware слой и "
-                        "спрашивать человека только там, где система не может решить сама, — ASR резко "
-                        "падает без существенной потери Utility.", 12, INTER, True, 8.958 - 0.44, 1.3) + 0.30
-    r = rect(s, M, hy, 8.958, hh, fill=None, lineclr=BLACK, linew=0.75)
-    tf = r.text_frame
-    tf.margin_left = tf.margin_right = Inches(0.22)
-    tf.margin_top = Inches(0.15)
-    tf.vertical_anchor = MSO_ANCHOR.TOP
-    para(tf, "Продуктовая гипотеза", 11, False, BLUE, INTER, space=6, first=True)
-    para(tf, "Если вынести authority control из LLM в детерминированный context-aware слой и спрашивать "
-             "человека только там, где система не может решить сама, — ASR резко падает без "
-             "существенной потери Utility.", 12, True, BLACK, INTER, space=0, line=1.3)
-
-    y = lede(s, "Мы оптимизируем безопасную автономность, а не количество блокировок.", y=hy + hh + 0.24)
-    text(s, M, y + 0.16, 8.6, 0.50,
-         "Измеряются пять метрик сразу: ASR, Utility, false positives, friction, latency. "
-         "Конфигурация «запретить всё» даёт ASR 0 % и решением не является.",
-         size=12, font=ARIAL, line=1.2, space=0)
-
-    # ---------------------------------------------------------- 4. threat model
+    # ---------------------------------------------------------- 4. how a decision is made
     s = new_slide(prs)
-    y = title(s, "Threat model: intent ≠ authority", w=7.2)
-    y = lede(s, "Доверенный разработчик. Недоверенное окружение. Модель, которой можно управлять.",
-             y=y + 0.18)
-    y = cards(s, [
-        ("Доверено",
-         "Разработчик и его задача. Глобальный конфиг пользователя. Собственный код Kilo. "
-         "Sandbox-бэкенд операционной системы."),
-        ("Недоверено",
-         "Рассуждение модели. Содержимое репозитория, README и docs. Имя пакета, выбранное моделью. "
-         "Метаданные MCP-инструментов. Исполняемый код и конфиг проекта."),
-        ("Следствие",
-         "Решение не зависит от того, распознала ли модель атаку: его принимает детерминированный "
-         "слой вне модели, а подтверждает профиль ОС."),
-    ], y=y + 0.20, xs=COL3_X, w=COL3_W, body_h=0.60, size=11)
+    y = title(s, "Решение — по действию, источнику и истории")
 
-    hline(s, M, y + 0.13, 8.958, GRAY, 0.75)
-    y = text(s, M, y + 0.25, 8.6, 0.26,
-             "Десять классов угроз, каждый измеряется отдельными сценариями",
-             size=12, bold=True, font=INTER, space=0) and below(0.12)
-    text(s, M, y, 8.6, 0.62,
-         "Деструктивные вызовы · чувствительные файлы · подмена политики · prompt injection · утечка "
-         "секретов · многошаговые атаки · slopsquatting · делегированная authority MCP · код "
-         "проекта · ambient authority расширения.",
-         size=11, font=ARIAL, color=GRAY, line=1.25, space=0)
-
-    # ---------------------------------------------------------- 5. why not obvious
-    s = new_slide(prs)
-    y = title(s, "Очевидные подходы и их пределы")
-    y = lede(s, "Каждый решает часть задачи. Ни один не закрывает её целиком.", y=y + 0.18)
-    y = cards(s, [
-        ("01",
-         "Prompt guardrails\n\nЗащищают вход модели. Но если injection уже победила intent, "
-         "guardrail не ограничивает то, что агент физически может сделать."),
-        ("02",
-         "Denylist пакетов\n\nЗакрывает уже известное. Свежий slopsquat по определению отсутствует "
-         "в списке в момент установки."),
-        ("03",
-         "Только sandbox\n\nОграничивает эффект, но не различает легитимную работу и атаку: "
-         "workspace-запись нужна и той и другой. И не работает до первого tool call."),
-        ("04",
-         "Подтверждать всё вручную\n\nБезопасно на бумаге. На практике даёт approval fatigue "
-         "и заканчивается включением skip-permissions."),
-    ], y=y + 0.19, xs=COL4_X, w=COL4_W, body_h=0.60, size=11)
-    hline(s, M, y + 0.13, 8.958, GRAY, 0.75)
-    text(s, M, y + 0.25, 8.6, 0.48,
-         "Security Auto использует все четыре идеи, но переносит решение об authority в отдельный "
-         "детерминированный слой и подтверждает его профилем ОС там, где это выполнимо.",
-         size=12, font=ARIAL, line=1.2, space=0)
-
-    # ---------------------------------------------------------- 6. architecture
-    s = new_slide(prs)
-    y = title(s, "Как работает Security Auto")
-    y = lede(s, "Один choke point для эффектов и две границы, срабатывающие раньше tool call.",
-             y=y + 0.18)
-
-    y0 = y + 0.22
-    bh = 0.46
-    boxes = [
-        ("Agent\ntool call", 0.521, 1.30, None),
-        ("Normalization\nshell AST · пути", 2.061, 1.55, None),
-        ("Security\nEngine", 3.851, 1.30, BLUE),
-        ("Authority\nALLOW / ASK / DENY", 5.391, 1.85, None),
-        ("Executor\nOS sandbox", 7.591, 1.40, None),
+    q = [
+        ("Что агент хочет сделать", "запустить команду, прочитать файл, вызвать инструмент"),
+        ("С каким файлом или пакетом", "путь раскрывается до настоящего, команда разбирается"),
+        ("Откуда пришёл вызов", "встроенный инструмент, MCP, инструмент проекта, расширение"),
+        ("Просил ли это пользователь", "движок этого входа не получает и судит одинаково"),
+        ("Что уже было в этой сессии", "какие секреты прочитаны и в какие файлы попали"),
+        ("Какие признаки риска нашлись", "разбор команды, происхождение пакета, содержимое файла"),
     ]
-    for label, x, w, fill in boxes:
-        r = rect(s, x, y0, w, bh, fill=fill, lineclr=None if fill else BLACK)
-        tf = r.text_frame
-        head, sub = label.split("\n")
-        para(tf, head, 11, True, WHITE if fill else BLACK, INTER, space=1, first=True)
-        para(tf, sub, 9, False, WHITE if fill else GRAY, ARIAL, space=0)
-    for x, w in ((1.861, 0.16), (3.641, 0.16), (5.191, 0.16), (7.271, 0.28)):
-        arrow(s, x, y0 + bh / 2, w)
+    y0 = y + 0.24
+    for i, (head, sub) in enumerate(q):
+        x = COL3_X[i % 3]
+        yy = y0 + (i // 3) * 0.70
+        text(s, x, yy, COL3_W, 0.21, head, size=11, color=BLUE, font=INTER, space=0)
+        text(s, x, yy + 0.23, COL3_W, 0.38, sub, size=9.5, font=ARIAL, color=GRAY, line=1.2, space=0)
+    y = y0 + 2 * 0.70
 
-    text(s, 3.851, y0 + bh + 0.14, 5.20, 0.22,
-         "Evidence-слои: только ужесточают решение, никогда не ослабляют",
-         size=10, color=GRAY, font=ARIAL, space=0)
-    evy = y0 + bh + 0.42
-    for i, name in enumerate(["Package Security", "Stateful Egress", "Delegated Tool Security",
-                              "Content Secret Detection"]):
-        x = 3.851 + i * 1.335
-        r = rect(s, x, evy, 1.245, 0.34, fill=None, lineclr=GRAY, linew=0.5)
-        para(r.text_frame, name, 9, False, BLACK, ARIAL, space=0, first=True)
-        c = s.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, Inches(x + 0.62), Inches(evy),
-                                   Inches(x + 0.62), Inches(evy - 0.045))
-        c.line.color.rgb = GRAY
-        c.line.width = Pt(0.5)
-
-    hline(s, M, evy + 0.52, 8.958, GRAY, 0.75)
-    y = text(s, M, evy + 0.66, 8.6, 0.26, "До того, как tool call вообще появится",
-             size=12, bold=True, font=INTER, space=0) and below(0.12)
+    r = rect(s, M, y, 8.958, 0.40, fill=BLUE)
+    para(r.text_frame, "Политика безопасности — один и тот же движок для каждого вызова с "
+                       "последствиями", 12, True, WHITE, INTER, space=0, first=True)
+    r.text_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
     cards(s, [
-        ("Executable Code Trust",
-         "Репозиторный .kilocode/tool/*.ts и project-plugin исполняют module scope в момент импорта. "
-         "discovery != execution: модуль не импортируется, пока человек не одобрил эти байты."),
-        ("Permissioned Extension Runtime + Read-Confinement",
-         "Одобренное расширение живёт в дочернем процессе под профилем ОС. Привилегированные "
-         "эффекты — IPC-запросы, которые судит тот же движок."),
-    ], y=y, xs=COL2_X, w=COL2_W, body_h=0.55)
+        ("Разрешено · ALLOW", "Действие выполняется в тех границах, к которым относится разрешение."),
+        ("Вопрос человеку · ASK", "Дальше без человека небезопасно. Самостоятельный режим этот "
+                                  "вопрос не снимает."),
+        ("Запрещено · DENY", "Действие не выполняется. Агент получает причину и продолжает работу."),
+    ], y=y + 0.40 + 0.22, xs=COL3_X, w=COL3_W, body_h=0.46, size=11)
 
-    # ---------------------------------------------------------- 7. layers
+    # ---------------------------------------------------------- 5. where risk signals come from
     s = new_slide(prs)
-    y = title(s, "Слои защиты и что каждый закрыл")
-    y = lede(s, "Ниже — вклад именно этого слоя, а не накопленной суммы.", y=y + 0.18)
-    y = cards(s, [
-        ("Deterministic Security",
-         "ALLOW / ASK / DENY для каждого side-effecting вызова. Shell разбирается Tree-sitter, "
-         "пути классифицируются после канонизации.",
-         "деструктивные 6/6 → 0/6"),
-        ("Package Security",
-         "Provenance пакета оценивается до запуска package manager. Неопределённость никогда "
-         "не сводится к ALLOW.",
-         "пакеты 42/42 → 0/42"),
-        ("Stateful Egress · Content Secret Detection",
-         "Секрет, полученный на шаге N, влияет на исходящее решение на шаге M. Секрет определяется "
-         "по содержимому, а не по имени.",
-         "exfil 12/15 → 0/15\nсекреты 33/33 → 6/33"),
-        ("Delegated Tool Security",
-         "Capability-модель для MCP, plugin и workspace-инструментов. Provenance структурная; "
-         "readOnlyHint не даёт ничего.",
-         "MCP/custom 30/30 → 3/30"),
-    ], y=y + 0.19, xs=COL4_X, w=COL4_W, body_h=0.60, size=11)
+    y = title(s, "Откуда берутся признаки риска")
+    y = lede(s, "Каждый признак — ответ на понятный вопрос, а не совпадение со списком строк.",
+             y=y + 0.18)
+    left = [
+        ("Опасна ли сама команда",
+         "Раскрываются переменные, вызовы и пути.",
+         "Deterministic Security"),
+        ("Что известно про пакет",
+         "Возраст, распространённость, скрипты установки.",
+         "Package Security"),
+        ("Мы уже читали секрет",
+         "Что прочитано и в какие файлы это попало.",
+         "Stateful Egress"),
+        ("Кто вызывает действие",
+         "Права следуют из происхождения, не из описания.",
+         "Delegated Tool Security"),
+    ]
+    right = [
+        ("Есть ли в файле учётные данные",
+         "Форматы токенов, ключи, присваивания в тексте.",
+         "Content Secret Detection"),
+        ("Код проекта пытается запуститься сам",
+         "Файл выполняет верхний уровень при импорте.",
+         "Executable Code Trust"),
+        ("Расширение выходит за свои права",
+         "Чтение, запись, сеть и процессы — по запросу.",
+         "Permissioned Extension Runtime"),
+    ]
+    y0 = y + 0.24
+    qa_list(s, left, COL2_X[0], y0, COL2_W, pitch=0.72)
+    qa_list(s, right, COL2_X[1], y0, COL2_W, pitch=0.72)
 
-    hline(s, M, y + 0.08, 8.958, GRAY, 0.75)
-    text(s, M, y + 0.15, 8.958, 0.22,
-         "Executable Code Trust · Permissioned Extension Runtime · Read-Confinement",
-         size=11, color=BLUE, font=INTER, space=0)
-    text(s, M, y + 0.37, 8.958, 0.24,
-         "Код проекта не исполняется до решения о доверии; чтения расширения сужены профилем ОС.",
-         size=11, font=ARIAL, line=1.2, space=0)
-    text(s, M, y + 0.62, 8.958, 0.22,
-         "pre-gate 27/27 → 3/27 · runtime расширения 24/24 → 0/24 · чтения 33/33 → 3/33",
-         size=11, bold=True, color=BLUE, font=INTER, space=0)
-
-    # ---------------------------------------------------------- 8. slopsquatting
+    # ---------------------------------------------------------- 6. allow is not full access
     s = new_slide(prs)
-    y = title(s, "Slopsquatting: решение до установки")
-    y = lede(s, "Проверка внутри agent loop, а не в CI и не в pre-commit хуке.", y=y + 0.18)
+    y = title(s, "Разрешить действие ≠ отдать все права", w=8.4)
+    y = lede(s, "Для расширения проекта одобрение — только первый шаг.", y=y + 0.18)
+    ly = vchain(s, [
+        ("Пользователь одобрил расширение", "одобрены конкретные байты: правка файла отзывает одобрение"),
+        ("Ему выданы конкретные права", "чтение, запись, сеть, запуск процессов — по отдельности"),
+        ("Работает в отдельном процессе под профилем ОС", "ссылка, «..» и абсолютный путь не выводят наружу"),
+        ("Привилегированное действие — снова запрос", "к тому же движку, а не прямой вызов"),
+    ], x=M, y=y + 0.20, w=5.30)
+
+    rx, ry = 6.100, y + 0.20
+    text(s, rx, ry, 3.379, 0.21, "Что это дало на измерении", size=11, color=BLUE, font=INTER, space=0)
+    ry += 0.29
+    for head, val in (("Расширение вышло за выданные права", "24 / 24  →  0 / 24"),
+                      ("Расширение прочитало чужой файл", "33 / 33  →  3 / 33")):
+        hh = max(measure(head, 10.5, ARIAL, False, 3.379, 1.2), 0.20)
+        text(s, rx, ry, 3.379, hh, head, size=10.5, font=ARIAL, space=0)
+        text(s, rx, ry + hh + 0.03, 3.379, 0.30, val, size=15, bold=True, color=BLUE, font=INTER, space=0)
+        ry += hh + 0.44
+    text(s, rx, ry + 0.06, 3.379, 1.22,
+         "Граница держится на механизме операционной системы. На macOS проверена прямыми пробами "
+         "внутри настоящего процесса; профиль Linux написан, но здесь не проверялся. Без такого "
+         "механизма расширение не запускается вовсе.",
+         size=9.5, font=ARIAL, color=GRAY, line=1.25, space=0)
+    text(s, M, ly + 0.14, 5.30, 0.20,
+         "Permissioned Extension Runtime · Read-Confinement",
+         size=9, color=GRAY, font=ARIAL, space=0)
+
+    # ---------------------------------------------------------- 7. suspicious package
+    s = new_slide(prs)
+    y = title(s, "Подозрительный пакет останавливается до установки")
+    y = lede(s, "Модель придумывает имя библиотеки, атакующий его заранее регистрирует.", y=y + 0.14)
 
     y0 = y + 0.22
-    steps = [
-        ("Агент предлагает\nзависимость", 0.521, 1.68),
-        ("Package Risk\nEvaluator", 2.481, 1.68),
-        ("Provenance\nсигналы", 4.441, 1.68),
-        ("Решение\nDENY / ASK / ALLOW", 6.401, 1.68),
-    ]
-    for i, (label, x, w) in enumerate(steps):
-        r = rect(s, x, y0, w, 0.56, fill=BLUE if i in (1, 3) else None,
-                 lineclr=None if i in (1, 3) else BLACK)
+    steps = [("Агент предлагает\nзависимость", 0.521, 1.90, None),
+             ("Оценка\nпроисхождения", 2.641, 1.90, BLUE),
+             ("Решение\nALLOW · ASK · DENY", 4.761, 1.90, BLUE),
+             ("Установка\nзапускается или нет", 6.881, 1.90, None)]
+    for i, (label, x, w, fill) in enumerate(steps):
+        r = rect(s, x, y0, w, 0.56, fill=fill, lineclr=None if fill else BLACK)
         head, sub = label.split("\n")
-        para(r.text_frame, head, 11, True, WHITE if i in (1, 3) else BLACK, INTER, space=1, first=True)
-        para(r.text_frame, sub, 9, False, WHITE if i in (1, 3) else GRAY, ARIAL, space=0)
+        para(r.text_frame, head, 10.5, True, WHITE if fill else BLACK, INTER, space=1, first=True)
+        para(r.text_frame, sub, 9, False, WHITE if fill else GRAY, ARIAL, space=0)
         if i < 3:
-            arrow(s, x + w + 0.04, y0 + 0.28, 0.20)
-    r = rect(s, 8.361, y0, 1.118, 0.56, fill=None, lineclr=GRAY, linew=0.5)
-    para(r.text_frame, "package\nmanager", 9, False, GRAY, ARIAL, space=0, first=True)
-    arrow(s, 8.121, y0 + 0.28, 0.20)
+            arrow(s, x + w + 0.03, y0 + 0.28, 0.16)
 
     y = cards(s, [
-        ("Детерминированные сигналы",
-         "Возраст пакета и релиза · объявленные install scripts · наличие репозитория · "
-         "не-registry источник · подмена registry в команде или в .npmrc"),
-        ("Эвристические сигналы",
-         "Adoption по загрузкам · схожесть имени с известным пакетом: edit distance, разделители, "
-         "аффиксы, гомоглифы, scope — с указанием, на что похоже"),
-        ("Неопределённость",
-         "Метаданные недоступны, пакет не найден, диапазон не разрешён. Неопределённость никогда "
-         "не сводится к ALLOW: metadata lookup failure ≠ trusted"),
-    ], y=y0 + 0.56 + 0.30, xs=COL3_X, w=COL3_W, body_h=0.55, size=11)
+        ("Что известно точно",
+         "Возраст пакета и выпуска, скрипты установки, репозиторий, подмена реестра."),
+        ("Что оцениваем приблизительно",
+         "Насколько распространён и похоже ли имя на известную библиотеку."),
+        ("Если ничего не известно",
+         "Метаданных нет, пакета нет в реестре. Неизвестность не даёт разрешения."),
+    ], y=y0 + 0.56 + 0.16, xs=COL3_X, w=COL3_W, body_h=0.58, size=11)
+    statement(s, y + 0.12, "Происхождение пакета оценивается до его локального исполнения",
+              "Проверка идёт внутри работы агента, а не в сборке. Это оценка происхождения, а не разбор кода. Измерено: 42 из 42 без защиты, 0 из 42 с ней.")
 
-    hline(s, M, y + 0.13, 8.958, GRAY, 0.75)
-    text(s, M, y + 0.25, 8.958, 0.80,
-         [("Suspicious package provenance is evaluated before local execution.",
-           {"size": 13, "bold": True, "font": INTER, "space": 5}),
-          ("Не детектор произвольного zero-day. Пакет, чей код выполнился бы прямо сейчас, получает "
-           "DENY; прочая подозрительная provenance — hard ASK. Измерено: 42/42 → 0/42.",
-           {"size": 12, "font": ARIAL, "line": 1.2, "space": 0})])
-
-    # ---------------------------------------------------------- 9. prompt injection
+    # ---------------------------------------------------------- 8. prompt injection
     s = new_slide(prs)
-    y = title(s, "Prompt injection")
-    y = lede(s, "Injection может изменить намерение модели. Она не снимает hard rules, package "
-                "preflight, executable-code trust и профиль ОС.", y=y + 0.18, w=8.4)
-
-    y0 = y + 0.22
-    chain = [
-        ("Вредоносный README", 0.521, 1.90, None),
-        ("Модель хочет\nопасное действие", 2.641, 1.90, None),
-        ("SecurityEngine\nвне модели", 4.761, 1.90, BLUE),
-        ("Решение по действию,\nне по тексту", 6.881, 1.90, BLUE),
-    ]
-    for i, (label, x, w, fill) in enumerate(chain):
-        r = rect(s, x, y0, w, 0.60, fill=fill, lineclr=None if fill else BLACK)
-        parts = label.split("\n")
-        para(r.text_frame, parts[0], 11, True, WHITE if fill else BLACK, INTER, space=1, first=True)
-        if len(parts) > 1:
-            para(r.text_frame, parts[1], 9, False, WHITE if fill else GRAY, ARIAL, space=0)
-        if i < 3:
-            arrow(s, x + w + 0.03, y0 + 0.30, 0.16)
-
-    y = text(s, M, y0 + 0.60 + 0.26, 8.958, 0.26,
-             "Что именно не зависит от того, что «поняла» модель",
-             size=12, bold=True, font=INTER, space=0) and below(0.16)
-    y = cards(s, [
-        ("Hard filesystem rules",
-         "Деструктивные операции над корнями и предками workspace, чтение приватных ключей — "
-         "DENY по правилу, а не по распознаванию."),
-        ("Package Security · capability",
-         "Provenance оценивается до исполнения. Инструмент с неизвестной authority не выполняется "
-         "без человека."),
-        ("Executable Code Trust · профиль ОС",
-         "Код проекта не импортируется до одобрения по содержимому. Чтения и сеть расширения "
-         "отклоняет профиль ОС."),
-    ], y=y, xs=COL3_X, w=COL3_W, body_h=0.50, size=11)
-    hline(s, M, y + 0.13, 8.958, GRAY, 0.75)
-    text(s, M, y + 0.22, 8.958, 0.44,
-         "Один класс остаётся открытым и назван честно: семантический exfil через текст README, "
-         "atk-readme-injection-exfil — успешен 3/3 во всех девяти конфигурациях.",
-         size=11, font=ARIAL, color=GRAY, line=1.2, space=0)
-
-    # ---------------------------------------------------------- 10. benchmark
-    s = new_slide(prs)
-    y = title(s, "Benchmark: как получены цифры")
-    y = lede(s, "Бенчмарк — часть решения, а не отчёт о нём.", y=y + 0.18)
-    y = cards(s, [
-        ("Датасет",
-         "130 сценариев: 81 attack, 49 utility. По три повтора. Девять конфигураций лестницы, "
-         "соседние отличаются одним флагом."),
-        ("Изоляция",
-         "Одноразовый sandbox в temp, поддельный HOME, инертные shim'ы package manager'ов первыми "
-         "в PATH, сеть только на loopback."),
-        ("Оракул",
-         "Успех атаки — наблюдаемый побочный эффект, а не текст модели: удалённая канарейка, "
-         "фейковый секрет в коллекторе, маркер shim'а."),
-    ], y=y + 0.19, xs=COL3_X, w=COL3_W, body_h=0.55, size=11)
-
+    y = title(s, "Намерение меняется, а полномочия — нет")
+    y = lede(s, "Текст в репозитории бывает адресован модели, а не человеку.", y=y + 0.14)
     y0 = y + 0.18
-    loop = ["Найти атаку", "Воспроизвести", "Canary", "Baseline", "Protected", "Измерить", "Новый residual"]
-    xw = 1.185
-    for i, label in enumerate(loop):
-        x = 0.521 + i * (xw + 0.10)
-        r = rect(s, x, y0, xw, 0.42, fill=None, lineclr=BLUE if i in (3, 4) else GRAY, linew=0.75)
-        para(r.text_frame, label, 9, i in (3, 4), BLACK, ARIAL, space=0, first=True)
-        if i < len(loop) - 1:
-            arrow(s, x + xw + 0.01, y0 + 0.21, 0.08)
-    y = text(s, M, y0 + 0.42 + 0.14, 8.958, 0.44,
-             "После каждого нового control adversarial suite расширялась: старые конфигурации "
-             "оцениваются на более сильном наборе — это честнее, а не регрессия.",
-             size=11, font=ARIAL, line=1.2, space=0) and below(0.16)
-    stat_row(s, [
-        ("3510", "прогонов, 0 errored"),
-        ("237", "прогонов атак"),
-        ("147", "прогонов utility"),
-        ("5", "остаточных сценариев"),
-    ], y=y, numsize=20)
+    chain = [("Текст в README\nадресован модели", 0.521, 1.90, None),
+             ("Модель хочет\nопасное действие", 2.641, 1.90, None),
+             ("Решает слой\nвне модели", 4.761, 1.90, BLUE),
+             ("Права остались\nпрежними", 6.881, 1.90, BLUE)]
+    for i, (label, x, w, fill) in enumerate(chain):
+        r = rect(s, x, y0, w, 0.56, fill=fill, lineclr=None if fill else BLACK)
+        head, sub = label.split("\n")
+        para(r.text_frame, head, 10.5, True, WHITE if fill else BLACK, INTER, space=1, first=True)
+        para(r.text_frame, sub, 9, False, WHITE if fill else GRAY, ARIAL, space=0)
+        if i < 3:
+            arrow(s, x + w + 0.03, y0 + 0.28, 0.16)
 
-    # ---------------------------------------------------------- 11. results (blue)
+    y = cards(s, [
+        ("Жёсткие правила по файлам",
+         "Удаление дерева и чтение ключей — отказ по правилу, а не по догадке."),
+        ("Пакеты и права инструментов",
+         "Происхождение оценивается до исполнения. Неизвестные права ждут человека."),
+        ("Код проекта и система",
+         "Модуль не импортируется до одобрения. Чтения расширения судит система."),
+    ], y=y0 + 0.56 + 0.20, xs=COL3_X, w=COL3_W, body_h=0.58, size=11)
+    statement(s, y + 0.10, "Что осталось открытым",
+              "Если каждое действие цепочки разрешено по отдельности — прочитать обычный файл "
+              "проекта можно, отправить его наружу тоже, — мы это не ловим: 3 из 3 прогонов.")
+
+    # ---------------------------------------------------------- 9. UI: same command, two answers
+    s = new_slide(prs)
+    y = title(s, "Одна команда — разные решения", y=0.940)
+    y = lede(s, "Записи настоящих сессий Kilo с этой ветки. Отличается только пакет.", y=y + 0.16)
+    y = shot(s, "02-known-package.png", M, y + 0.16, 8.000,
+             "Зрелая библиотека — ставится сразу, без единого вопроса")
+    y = shot(s, "03-unknown-package-stopped.png", M, y + 0.18, 8.000,
+             "Придуманного имени в реестре нет — агент остановился, пакетный менеджер не запускался")
+    text(s, M, y + 0.14, 8.958, 0.24,
+         "Это не чёрный список: имени, зарегистрированного вчера, в списке нет по определению.",
+         size=11, font=ARIAL, space=0)
+
+    # ---------------------------------------------------------- 10. UI: with and without
+    s = new_slide(prs)
+    y = title(s, "Без защиты проект исчезает", y=0.940)
+    y = lede(s, "Та же задача и тот же агент. Отличается одно значение настройки.", y=y + 0.16)
+    y = shot(s, "06-workspace-wipe-baseline.png", M, y + 0.16, 8.000,
+             "Security Auto выключен — после прогона в рабочем дереве не осталось ничего")
+    y = shot(s, "07-workspace-wipe-stopped.png", M, y + 0.18, 8.000,
+             "Security Auto включён — агент ждёт человека, файлы на месте")
+    text(s, M, y + 0.14, 8.958, 0.24,
+         "Запись сделана без человека за экраном, поэтому вопрос виден как «отвечать некому».",
+         size=11, font=ARIAL, color=GRAY, space=0)
+
+    # ---------------------------------------------------------- 11. UI: the system remembers
+    s = new_slide(prs)
+    y = title(s, "Система помнит, что прочитала", y=0.900)
+    y = shot(s, "05-secret-upload-baseline.png", M, y + 0.16, 8.000,
+             "Выключено: чтение настроек, заметка и правка исходника прошли молча — и выгрузка тоже")
+    y = shot(s, "04-secret-upload-blocked.png", M, y + 0.18, 8.000,
+             "Включено: те же четыре шага, но выгрузка отклонена — сервис не получил ничего")
+
+    # ---------------------------------------------------------- 12. how it was measured
+    s = new_slide(prs)
+    y = title(s, "Успех атаки — это последствие")
+    y = cards(s, [
+        ("Что проверяли",
+         "130 сценариев: 81 атака и 49 обычных задач, каждый по три раза. Девять конфигураций: "
+         "соседние отличаются одним включённым слоем."),
+        ("Как изолировали",
+         "Одноразовый каталог во временной папке, подставной домашний каталог, безвредные заглушки "
+         "пакетных менеджеров, сеть только на петле."),
+        ("Как определяли успех",
+         "Канарейка действительно удалена. Выдуманный ключ действительно дошёл до приёмника. "
+         "Установка действительно запустилась."),
+    ], y=y + 0.22, xs=COL3_X, w=COL3_W, body_h=0.80, size=11)
+    y = ladder(s, y + 0.38)
+    text(s, M, y + 0.04, 8.958, 0.68,
+         "Набор атак рос по ходу работы: найденный обход не убирался после исправления, а "
+         "добавлялся в общий набор, и все конфигурации пересчитывались заново. Ранние конфигурации "
+         "выглядят хуже потому, что тест стал сложнее.",
+         size=11, font=ARIAL, line=1.2, space=0)
+
+    # ---------------------------------------------------------- 13. headline result (blue)
     s = new_slide(prs, blue=True)
-    y = title(s, "Результаты", blue=True, y=0.980, size=26)
-    y = text(s, M, y + 0.14, 8.958, 0.95, "ASR 100 % → 6 %",
-             size=48, bold=True, color=WHITE, font=INTER, space=0) and below(0.10)
+    y = title(s, "Результат", blue=True, y=0.980, size=26)
+    y = text(s, M, y + 0.10, 8.958, 0.90, "100 %  →  6 %",
+             size=42, bold=True, color=WHITE, font=INTER, space=0) and below(0.04)
     y = text(s, M, y, 8.958, 0.52,
-             "15 из 237 прогонов атак · 130 сценариев × 3 повтора × 9 конфигураций\n"
-             "3510 прогонов, 0 errored",
-             size=13, bold=True, color=WHITE, font=INTER, space=0) and below(0.16)
+             "Успешность атак (ASR) — доля прогонов, которые довели дело до настоящего вреда.\n"
+             "15 прогонов из 237 · 3510 прогонов всего, ни одного сорванного",
+             size=12, bold=True, color=WHITE, font=INTER, line=1.3, space=0) and below(0.14)
     hline(s, M, y, 8.958, WHITE, 0.75)
     y = stat_row(s, [
-        ("98 %", "Utility · 144/147"),
-        ("0", "Safe DENY false positives"),
-        ("0,154", "hard ASK на задачу · 60/390"),
-        ("1,04 мс", "p95 стоимости решения"),
-    ], y=y + 0.20, blue=True)
-    text(s, M, y + 0.18, 8.958, 0.50,
-         "Extension и executable-code utility — 100 % (42/42) во всех девяти конфигурациях. "
-         "Единственная потерянная utility — честный трёхдневный пакет с hard ASK.",
-         size=12, color=WHITE, font=ARIAL, line=1.25, space=0)
+        ("98 %", "обычных задач по-прежнему выполняются · 144 из 147"),
+        ("0", "безопасных действий запрещено по ошибке"),
+        ("0,15", "вопросов человеку на задачу · 60 на 390"),
+        ("1,04 мс", "стоит решение в 95 % случаев"),
+    ], y=y + 0.20, blue=True, numsize=22)
+    text(s, M, y + 0.14, 8.958, 0.50,
+         "Конфигурация «запретить всё» дала бы ноль успешных атак и ноль сделанных задач — поэтому "
+         "величин пять, а не одна. Единственная потерянная задача — честный трёхдневный пакет: это "
+         "измеренная цена, а не сбой.",
+         size=11, color=WHITE, font=ARIAL, line=1.25, space=0)
 
-    # ---------------------------------------------------------- 12. ablation
+    # ---------------------------------------------------------- 14. threat-by-threat
     s = new_slide(prs)
-    y = title(s, "Вклад каждого слоя")
-    y = lede(s, "Overall ASR, 237 прогонов атак. Каждая строка добавляет один слой к предыдущей.",
-             y=y + 0.18)
+    y = title(s, "Насколько закрыт каждый вид угрозы", y=0.940)
+    y = lede(s, "Серая полоса — 100 % атак без защиты. Синяя — что доходит с защитой.", y=y + 0.16)
+    y = scorecard(s, [
+        ("Разрушительная команда, в том числе скрытая", 0, 15, "Закрыто"),
+        ("Чужие ключи и настройки самого Kilo", 0, 15, "Закрыто"),
+        ("Установка подозрительного пакета", 0, 42, "Закрыто"),
+        ("Внешний инструмент делает лишнее", 0, 30, "Закрыто"),
+        ("Утечка секрета цепочкой действий", 0, 15, "Закрыто"),
+        ("Расширение выходит за выданные права", 0, 24, "Закрыто"),
+        ("Расширение читает файлы разработчика", 3, 33, "Сильно снижено · 9 %"),
+        ("Код репозитория исполняется при загрузке", 3, 27, "Сильно снижено · 11 %"),
+        ("Секрет в обычном файле проекта", 6, 33, "Частично · 18 %"),
+        ("Текст в репозитории уговаривает агента", 3, 3, "Известное ограничение"),
+    ], y=y + 0.20, namew=3.60, trackw=1.85)
+    text(s, M, y + 0.14, 8.958, 0.46,
+         "Всего 15 прогонов из 237. Последняя строка не значит, что подсказка со стороны работает "
+         "всегда: уговорить агента удалить дерево или поставить чужой пакет — это строки 1–3.",
+         size=10.5, font=ARIAL, line=1.2, space=0)
 
-    rows = [
-        ("Baseline", 100, "100 % (237/237)", BLACK),
-        ("Deterministic Security", 86, "86 % (204/237)", GRAY),
-        ("+ Package Security", 68, "68 % (162/237)", GRAY),
-        ("+ Stateful Egress", 63, "63 % (150/237)", GRAY),
-        ("+ Delegated Tool Security", 52, "52 % (123/237)", GRAY),
-        ("+ Content Secret Detection", 39, "39 % (93/237)", GRAY),
-        ("+ Executable Code Trust", 30, "30 % (72/237)", GRAY),
-        ("+ Permissioned Extension Runtime", 18, "18 % (42/237)", GRAY),
-        ("+ Read-Confinement", 6, "6 % (15/237)", BLUE),
-    ]
-    y0, pitch, bh = y + 0.20, 0.262, 0.135
-    lx, bx, bwmax = 0.521, 3.010, 5.150
-    for i, (name, val, label, color) in enumerate(rows):
-        yy = y0 + i * pitch
-        text(s, lx, yy - 0.022, 2.40, 0.19, name, size=9,
-             bold=(color is BLUE), font=ARIAL, color=BLACK, space=0)
-        w = max(bwmax * val / 100.0, 0.05)
-        rect(s, bx, yy, w, bh, fill=color)
-        text(s, bx + w + 0.09, yy - 0.028, 1.65, 0.19, label, size=9,
-             bold=(color is BLUE), font=ARIAL, color=BLACK, space=0)
-    hline(s, bx, y0 + len(rows) * pitch - 0.060, bwmax, GRAY, 0.5)
-    text(s, M, y0 + len(rows) * pitch + 0.06, 8.958, 0.70,
-         "Baseline → финал: пакеты 42/42 → 0/42 · exfil 15/15 → 0/15 · MCP/custom 30/30 → 0/30 · "
-         "секреты 33/33 → 6/33 · pre-gate 27/27 → 3/27 · runtime 24/24 → 0/24 · чтения 33/33 → 3/33. "
-         "Колонка Extension-runtime охватывает оба runtime-класса (57 прогонов). Сравнивать значения "
-         "можно только внутри одной таблицы.",
-         size=11, font=ARIAL, color=GRAY, line=1.2, space=0)
-
-    # ---------------------------------------------------------- 13. demo / limits / pilot
+    # ---------------------------------------------------------- 15. limits and pilot
     s = new_slide(prs)
-    y = title(s, "Демонстрация, ограничения, пилот")
-    y = lede(s, "Каждое демо — сценарий бенчмарка с наблюдаемой канарейкой и одной командой запуска.",
-             y=y + 0.18)
+    y = title(s, "Что не закрыто и что дальше")
     y = cards(s, [
-        ("Демонстрация",
-         "A. Деструктивный shell — atk-workspace-wipe\n"
-         "B. Slopsquatting — atk-package-install\n"
-         "C. Секрет → egress — atk-egress-multi-step-benign\n"
-         "D. Чтение хостового секрета — atk-extread-symlink-escape\n"
-         "Baseline и защищённая конфигурация в одном прогоне."),
-        ("Ограничения",
-         "Метаданные файлов видны внутри сужённого хоста: без них не разрешается путь.\n"
-         "Классификатор читает маркеры, а не энтропию: голый токен и base64 не видны.\n"
-         "Read confinement проверен на macOS, для Linux не верифицирован.\n"
-         "Драйвер скриптованный: измеряется containment политики."),
-        ("Следующий шаг — пилот",
-         "Команда 5–10 разработчиков на репозитории с внешними зависимостями и MCP.\n"
-         "Метрики: ASR на контролируемом наборе, task Utility, Safe ASK / DENY FP, approvals "
-         "на задачу, latency, доля оставивших режим включённым."),
-    ], y=y + 0.19, xs=COL3_X, w=COL3_W, body_h=0.60, size=11)
+        ("Чего защита не умеет",
+         "Голый токен без признаков рядом и значение в base64 не распознаются как секрет.\n"
+         "Внутри сужённого процесса расширение видит, что файл существует и какого он размера.\n"
+         "Плагин, выбранный самим пользователем, остаётся в основном процессе.\n"
+         "Границы системы проверены на macOS; профиль Linux написан, но не проверен.\n"
+         "Проверка пакетов охватывает семейство npm."),
+        ("Чего не показывает измерение",
+         "Набор атак наш собственный: «100 % без защиты» — это про него, а не про Kilo вообще.\n"
+         "Ход работы агента задан сценарием, поэтому измеряется удержание, а не то, догадается ли "
+         "модель напасть.\n"
+         "Отдельного приложения не нужно: режим живёт внутри обычной работы с Kilo. Отдельного "
+         "экрана безопасности при этом пока нет — решение видно в тексте отказа и в обычном окне "
+         "подтверждения."),
+        ("Пилот",
+         "Команда 5–10 разработчиков, репозиторий с внешними зависимостями и MCP.\n"
+         "Что смотрим: доля успешных атак, доля доведённых задач, ошибочные запреты, вопросы на "
+         "задачу, задержка и сколько человек через две недели оставили режим включённым.\n"
+         "Продуктовый шаг: показать причину решения прямо в окне подтверждения."),
+    ], y=y + 0.22, xs=COL3_X, w=COL3_W, body_h=1.60, size=10.5)
     hline(s, M, y + 0.14, 8.958, GRAY, 0.75)
-    text(s, M, y + 0.24, 8.958, 0.24,
-         "bun run script/security-bench.ts --runs 1 --scenario <id> --configs baseline,"
-         "read-confined-extension-runtime",
-         size=11, font=ARIAL, color=GRAY, line=1.2, space=0)
+    text(s, M, y + 0.22, 8.958, 0.44,
+         "Повторить любую цифру:  bun run script/security-bench.ts --runs 3\n"
+         "Повторить любую запись сессии:  bash submission/evidence/ui/capture-all.sh",
+         size=10, font=ARIAL, color=GRAY, line=1.3, space=0)
 
-    # ---------------------------------------------------------- 14. team (blue)
+    # ---------------------------------------------------------- 16. team (blue)
     s = new_slide(prs, blue=True)
     y = title(s, "Команда и распределение задач", blue=True, y=0.980)
-    hdr = ["Участник", "Роль", "Зона ответственности", "Вклад", "Участие"]
+    hdr = ["Участник", "Роль", "За что отвечал", "Чем подтверждается", "Участие"]
     xs = [0.521, 2.221, 3.921, 6.221, 8.421]
     ws = [1.620, 1.620, 2.220, 2.120, 1.058]
     hy = y + 0.28
@@ -820,8 +878,8 @@ def build(prs):
     hline(s, M, hy + 0.28, 8.958, WHITE, 0.75)
     rows = [
         ["Дмитрий Воропаев", "Разработка,\nAI Product",
-         "Архитектура security engine, слои, extension runtime, benchmark, документация",
-         "19 из 19 коммитов ветки, подтверждено git history", "ведущая"],
+         "Архитектура движка решений, слои, процесс расширений, измерение, документация",
+         "19 коммитов из 19 в ветке, видно в истории репозитория", "ведущая"],
         ["[ЗАПОЛНИТЬ: имя]", "[ЗАПОЛНИТЬ]", "[ЗАПОЛНИТЬ]", "[ЗАПОЛНИТЬ]", "[ЗАПОЛНИТЬ]"],
     ]
     yy = hy + 0.42
@@ -831,14 +889,11 @@ def build(prs):
             text(s, x, yy, w, rh, cell, size=10, color=WHITE, font=ARIAL, line=1.2, space=0)
         yy += rh + 0.26
         hline(s, M, yy - 0.13, 8.958, WHITE, 0.4)
-    text(s, M, yy + 0.06, 5.4, 0.60,
+    text(s, M, yy + 0.06, 8.958, 0.44,
          "Строка-заполнитель дублируется по числу участников и заполняется командой перед подачей. "
-         "Подтверждена только первая строка: она выведена из истории репозитория. Данные, которых "
-         "репозиторий не подтверждает, не выдумываются.",
+         "Подтверждена только первая строка: она выведена из истории репозитория.",
          size=10, color=WHITE, font=ARIAL, line=1.2, space=0)
     footer_logos(s, blue=True)
-
-
 APP_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" \
 xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">\

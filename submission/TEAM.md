@@ -30,7 +30,7 @@ git показывает **19 коммитов** и **одного автора*
 
 - **Движок политики.** Детерминированное `ALLOW / ASK / DENY` для tool call'ов и наблюдательный
   seam в `SecurityGate`, через который бенчмарк снимает решения, не влияя на них.
-- **Evidence-слои.** Package Security (оценка provenance пакета до запуска package manager),
+- **Слои признаков риска.** Package Security (оценка происхождения пакета до запуска пакетного менеджера),
   Stateful Egress (посессионная связь sensitive-read → outbound), Delegated Tool Security
   (capability-модель для MCP и custom-инструментов), Content Secret Detection (секрет по
   содержимому, а не по имени файла).
@@ -44,7 +44,7 @@ git показывает **19 коммитов** и **одного автора*
   и false positives), executable code, extension runtime, extension read boundary.
 - **Документация.** Threat model, trust boundaries и read confinement.
 
-Результат этой работы измерен: ASR **100 % (237/237)** → **6 % (15/237)** при utility
+Результат этой работы измерен: доля успешных атак **100 % (237/237)** → **6 % (15/237)** при доле выполненных обычных задач
 **98 % (144/147)**, **3510** прогонов и **0 errored**; тесты — **557 pass / 0 fail** в
 `packages/opencode` (security + registry) и **65 pass / 1 skip** в `packages/kilo-sandbox`.
 

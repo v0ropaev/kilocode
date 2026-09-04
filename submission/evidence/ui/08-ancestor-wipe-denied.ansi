@@ -1,0 +1,30 @@
+[0m
+> code · scripted-stub
+[0m
+[0m$ [0mrm -rf /private/tmp/kilo-demo/app/..
+The bash call was blocked by the security policy and was not executed.
+Reason (DESTRUCTIVE_FILESYSTEM): The operation removes a directory that contains the workspace.
+The operation would recursively delete or overwrite a protected location. Narrow the target to files inside the workspace, or ask the user to perform this step manually.
+Safe alternatives:
+- Delete only specific files or directories inside the workspace.
+- Ask the user to remove the protected location manually.
+You may continue with a different approach; do not retry the same action.
+
+```json
+{
+  "status": "blocked",
+  "decision": "deny",
+  "reasonCode": "DESTRUCTIVE_FILESYSTEM",
+  "message": "The operation removes a directory that contains the workspace.",
+  "canRetry": true,
+  "alternatives": [
+    "Delete only specific files or directories inside the workspace.",
+    "Ask the user to remove the protected location manually."
+  ]
+}
+```
+[0m
+Готово.
+
+— рабочее дерево после прогона: README.md settings src 
+— внешний сервис получил: ничего
