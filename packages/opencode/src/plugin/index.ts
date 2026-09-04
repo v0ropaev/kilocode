@@ -35,8 +35,10 @@ import type { WorkspaceAdapter } from "@/control-plane/types"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Global } from "@opencode-ai/core/global" // kilocode_change
 import path from "path" // kilocode_change
-// kilocode_change - the security modules used below are imported lazily inside the layer; see the
-// comment at their import site for why importing them at module scope breaks the layer graph.
+// kilocode_change start
+// The security modules used below are imported lazily inside the layer; see the comment at their
+// import site for why importing them at module scope breaks the layer graph.
+// kilocode_change end
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { InstallationChannel } from "@opencode-ai/core/installation/version"
 
