@@ -109,6 +109,22 @@ export class HeuristicProvider implements ClassifierProvider {
   }
 }
 
+/**
+ * Walk a path through a decoded JSON body without asserting its shape. A backend's response is
+ * remote input like any other: a missing or oddly-typed field yields the empty string, which
+ * `parseVerdict` reads as no signal, rather than a cast that pretends the shape was checked.
+ */
+function firstString(body: unknown, keys: Array<string | number>): string {
+  let node: unknown = body
+  for (const key of keys) {
+    if (typeof node !== "object" || node === null) return ""
+    const entry = Object.entries(node).find(([name]) => name === String(key))
+    if (!entry) return ""
+    node = entry[1]
+  }
+  return typeof node === "string" ? node.trim() : ""
+}
+
 export interface ModelBackend {
   readonly name: string
   complete(system: string, user: string, maxTokens: number, signal: AbortSignal): Promise<string>
@@ -128,8 +144,7 @@ export function anthropicBackend(opts: { model?: string; apiKey?: string } = {})
         body: JSON.stringify({ model, max_tokens: maxTokens, system, messages: [{ role: "user", content: user }] }),
       })
       if (!res.ok) throw new Error(`anthropic ${res.status}`)
-      const body = (await res.json()) as { content?: Array<{ text?: string }> }
-      return (body.content?.[0]?.text ?? "").trim()
+      return firstString(await res.json(), ["content", 0, "text"])
     },
   }
 }
@@ -154,8 +169,7 @@ export function openaiCompatibleBackend(opts: { baseUrl: string; model: string; 
         }),
       })
       if (!res.ok) throw new Error(`openai-compat ${res.status}`)
-      const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> }
-      return (body.choices?.[0]?.message?.content ?? "").trim()
+      return firstString(await res.json(), ["choices", 0, "message", "content"])
     },
   }
 }

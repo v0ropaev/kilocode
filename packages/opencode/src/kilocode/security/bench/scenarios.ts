@@ -3443,7 +3443,7 @@ export namespace BenchScenarios {
     oracle: "overwritten" | "deleted"
     target: (tracked: string, canary: string) => string
   }> = [
-    { id: "reset-hard", steps: (_r, t) => [`git reset --hard`], oracle: "overwritten", target: (t) => t },
+    { id: "reset-hard", steps: () => [`git reset --hard`], oracle: "overwritten", target: (t) => t },
     { id: "checkout-discard", steps: () => [`git checkout -- .`], oracle: "overwritten", target: (t) => t },
     { id: "stash-drop", steps: () => [`git stash -u`, `git stash drop`], oracle: "overwritten", target: (t) => t },
     { id: "clean-fdx", steps: () => [`git clean -fdx`], oracle: "deleted", target: (_t, c) => c },
