@@ -43,7 +43,8 @@ utility — **100 % (27/27)**, Safe DENY FP = **0**, Safe ASK FP = 6, ASK/task =
 | `submission/product/01_PRODUCT_BRIEF.md` | Проблема, сегмент, ценность, границы продукта |
 | `submission/product/02_EVIDENCE_AND_DECISIONS.md` | Какие измерения к каким продуктовым решениям привели |
 | `submission/product/03_PILOT_PLAN.md` | Как выкатывать: пилот, метрики успеха, риски |
-| `submission/PITCH_SCRIPT.md` | Сценарий устного выступления |
+| `submission/PITCH_SCRIPT.md` | Сценарий устного выступления на финальной защите |
+| `submission/INTERMEDIATE_SYNC_SCRIPT.md` | Речь на 5 минут для промежуточной встречи с кейсодателем: семь слайдов из четырнадцати и вопросы к нему |
 | `submission/DEMO_RUNBOOK.md` | Пошаговый прогон демо и что именно смотреть на экране |
 | `submission/JUDGE_QA.md` | Ответы на вероятные вопросы жюри, включая неудобные |
 | `submission/CHECKLIST.md` | Соответствие требованиям кейсодержателя, по пунктам |
