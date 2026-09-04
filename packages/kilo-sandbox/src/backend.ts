@@ -119,6 +119,15 @@ export function prepareCommand(
   })
 }
 
+/**
+ * Apply a profile to an explicit launch, without consulting the ambient session profile. Used by the
+ * permissioned extension host, which confines a child process under a profile of its own rather than
+ * inheriting whatever the current session is running under.
+ */
+export function prepareLaunch(profile: Profile, launch: Launch) {
+  return confine(profile, launch)
+}
+
 export function backendSupport(network?: Profile["network"]) {
   return backend.support(network)
 }

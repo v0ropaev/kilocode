@@ -70,6 +70,8 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import * as ToolNetwork from "@/kilocode/sandbox/network" // kilocode_change
 import { ToolOrigin } from "@/kilocode/security/tool/origin" // kilocode_change
 import { CodeTrust } from "@/kilocode/security/code/trust" // kilocode_change
+import { ExtensionHost } from "@/kilocode/security/extension/host" // kilocode_change
+import { SecurityGate } from "@/kilocode/security/gate" // kilocode_change
 import { SecurityFlag } from "@/kilocode/security/flag" // kilocode_change
 import { Global } from "@opencode-ai/core/global" // kilocode_change
 import { MemoryService } from "@kilocode/kilo-memory/effect/service" // kilocode_change
@@ -238,16 +240,65 @@ const layer = Layer.effect(
         const globalDir = path.resolve(Global.Path.config)
         // A discovered file's module scope runs the instant it is imported, so the
         // trust decision has to happen here, between discovery and `import()`.
-        const codePolicy = CodeTrust.policy(
-          yield* config.getGlobal().pipe(Effect.catch(() => Effect.succeed(undefined))),
-          yield* SecurityFlag.codeEnabled(config),
-        )
+        const globalConfig = yield* config.getGlobal().pipe(Effect.catch(() => Effect.succeed(undefined)))
+        const codePolicy = CodeTrust.policy(globalConfig, yield* SecurityFlag.codeEnabled(config))
+        const runtimeOn = yield* SecurityFlag.runtimeEnabled(config)
+        const securityOptions = yield* SecurityGate.options({
+          config,
+          sandboxed: false,
+          workspace: { directory: ctx.directory, worktree: ctx.worktree },
+        })
         // kilocode_change end
         for (const match of matches) {
           const namespace = path.basename(match, path.extname(match))
           const origin = path.resolve(match).startsWith(globalDir + path.sep) ? "trusted-config" : "workspace" // kilocode_change
           // kilocode_change start - discovery != execution: an untrusted file is never imported
-          if (!CodeTrust.guard({ file: match, kind: "custom-tool", policy: codePolicy }).allow) continue
+          const trust = CodeTrust.guard({ file: match, kind: "custom-tool", policy: codePolicy })
+          if (!trust.allow) continue
+          // An approved *project* extension is evaluated in a permissioned host
+          // process, not here. Approval says it may run; it does not hand it this process's authority.
+          if (runtimeOn && trust.origin === "workspace" && trust.digest) {
+            const digest = trust.digest
+            const hosted = yield* Effect.promise(() =>
+              ExtensionHost.start({
+                identity: {
+                  type: "custom-tool",
+                  origin: trust.origin,
+                  source: match,
+                  digest,
+                  workspace: ctx.directory,
+                  granted: ExtensionHost.grantsFor(globalConfig, digest),
+                },
+                file: match,
+                scratch: path.join(Global.Path.state, "extension-host", digest.slice(0, 16)),
+                options: securityOptions,
+              }).catch(() => undefined),
+            )
+            if (hosted) {
+              for (const item of hosted.tools) {
+                custom.push(
+                  ToolOrigin.mark(
+                    {
+                      id: item.id,
+                      description: item.description,
+                      parameters: Schema.Unknown,
+                      execute: (args: unknown, toolCtx: Tool.Context) =>
+                        Effect.promise(async () => {
+                          const result = await hosted.invoke(item.id, args, toolCtx.sessionID)
+                          return {
+                            title: item.id,
+                            metadata: { extension: { digest, confined: hosted.confined } },
+                            output: result.ok ? (result.output ?? "") : `extension refused: ${result.error ?? "error"}`,
+                          }
+                        }),
+                    } as unknown as Tool.Def,
+                    origin,
+                  ),
+                )
+              }
+              continue
+            }
+          }
           // kilocode_change end
           // `match` is an absolute filesystem path from `Glob.scanSync(..., { absolute: true })`.
           // Import it as `file://` so Node on Windows accepts the dynamic import.

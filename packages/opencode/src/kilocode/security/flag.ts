@@ -27,6 +27,8 @@ export namespace SecurityFlag {
     content: boolean
     /** Trust boundary for executable project code, evaluated before import. */
     code: boolean
+    /** Permissioned host process for approved project extensions. */
+    runtime: boolean
   }
 
   function truthy(value: string | undefined) {
@@ -59,6 +61,10 @@ export namespace SecurityFlag {
       tools: layer(process.env["KILO_SECURITY_AUTO_TOOLS"], global?.experimental?.security_auto_tools),
       content: layer(process.env["KILO_SECURITY_AUTO_CONTENT"], global?.experimental?.security_auto_content),
       code: layer(process.env["KILO_SECURITY_AUTO_CODE"], global?.experimental?.security_auto_code),
+      runtime: layer(
+        process.env["KILO_SECURITY_AUTO_EXTENSION_RUNTIME"],
+        global?.experimental?.security_auto_extension_runtime,
+      ),
     }
     return result
   })
@@ -73,6 +79,21 @@ export namespace SecurityFlag {
     if (!(yield* enabled(config))) return false
     const global = yield* config.getGlobal().pipe(Effect.catch(() => Effect.succeed(undefined)))
     return layer(process.env["KILO_SECURITY_AUTO_CODE"], global?.experimental?.security_auto_code)
+  })
+
+  /**
+   * Is the permissioned extension runtime active? Resolved on its own for the same reason
+   * {@link codeEnabled} is: the loaders run long before any session or gate options exist.
+   */
+  export const runtimeEnabled = Effect.fn("SecurityFlag.runtimeEnabled")(function* (
+    config: Pick<Config.Interface, "getGlobal">,
+  ) {
+    if (!(yield* enabled(config))) return false
+    const global = yield* config.getGlobal().pipe(Effect.catch(() => Effect.succeed(undefined)))
+    return layer(
+      process.env["KILO_SECURITY_AUTO_EXTENSION_RUNTIME"],
+      global?.experimental?.security_auto_extension_runtime,
+    )
   })
 
   /**

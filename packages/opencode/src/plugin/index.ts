@@ -34,6 +34,10 @@ import { registerAdapter } from "@/control-plane/adapters"
 import type { WorkspaceAdapter } from "@/control-plane/types"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { CodeTrust } from "@/kilocode/security/code/trust" // kilocode_change
+import { ExtensionHost } from "@/kilocode/security/extension/host" // kilocode_change
+import { SecurityGate } from "@/kilocode/security/gate" // kilocode_change
+import { Global } from "@opencode-ai/core/global" // kilocode_change
+import path from "path" // kilocode_change
 import { SecurityFlag } from "@/kilocode/security/flag" // kilocode_change
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { InstallationChannel } from "@opencode-ai/core/installation/version"
@@ -195,29 +199,75 @@ const layer = Layer.effect(
 
         // kilocode_change start - classify repository-controlled plugin code before
         // its module scope can run. Read from the global config only: a project must not trust itself.
-        const codePolicy = CodeTrust.policy(
-          yield* config.getGlobal().pipe(Effect.catch(() => Effect.succeed(undefined))),
-          yield* SecurityFlag.codeEnabled(config),
-        )
+        const globalConfig = yield* config.getGlobal().pipe(Effect.catch(() => Effect.succeed(undefined)))
+        const codePolicy = CodeTrust.policy(globalConfig, yield* SecurityFlag.codeEnabled(config))
+        // An approved *project* plugin is evaluated in a permissioned host process,
+        // and its hooks are forwarded there. Approval decides that it may run, not with what authority.
+        const runtimeOn = yield* SecurityFlag.runtimeEnabled(config)
+        const instance = yield* InstanceState.context
+        const securityOptions = yield* SecurityGate.options({
+          config,
+          sandboxed: false,
+          workspace: { directory: instance.directory, worktree: instance.worktree },
+        })
+        const hostedSpecs = new Set<string>()
+        const hostPlugin = (file: string, digest: string) =>
+          ExtensionHost.start({
+            identity: {
+              type: "plugin",
+              origin: "workspace",
+              source: file,
+              digest,
+              workspace: instance.directory,
+              granted: ExtensionHost.grantsFor(globalConfig, digest),
+            },
+            file,
+            scratch: path.join(Global.Path.state, "extension-host", digest.slice(0, 16)),
+            options: securityOptions,
+          })
         // kilocode_change end
         const loaded = yield* Effect.promise(() =>
           PluginLoader.loadExternal({
             items: plugins,
             kind: "server",
-            // kilocode_change start - the trust decision sits between resolve and import
-            trust: (resolved, origin) =>
-              CodeTrust.guard({
+            // kilocode_change start - the trust decision sits between resolve and import; an approved
+            // project plugin is then started in the host instead of being imported here
+            trust: (resolved, origin) => {
+              const decision = CodeTrust.guard({
                 file: resolved.entry,
                 kind: "plugin",
                 scope: origin.scope,
                 policy: codePolicy,
-              }).allow,
+              })
+              if (!decision.allow) return false
+              if (!runtimeOn || decision.origin !== "workspace" || !decision.digest) return true
+              hostedSpecs.add(resolved.spec)
+              const file = CodeTrust.fileFromUrl(resolved.entry)
+              const digest = decision.digest
+              void hostPlugin(file, digest)
+                .then((handle) => {
+                  // Hosted hooks observe events; they cannot mutate the main process's objects, which
+                  // is a deliberate reduction of what a project plugin used to be able to do.
+                  const forwarding: Record<string, (hookInput: unknown, output: unknown) => Promise<void>> = {}
+                  for (const name of handle.hooks) {
+                    forwarding[name] = async (hookInput, output) => {
+                      await handle.trigger(name, hookInput, output)
+                    }
+                  }
+                  hooks.push(forwarding as unknown as Hooks)
+                })
+                .catch(() => undefined)
+              return false
+            },
             // kilocode_change end
             report: {
               start(candidate) {},
               missing(candidate, _retry, message) {},
               error(candidate, _retry, stage, error, resolved) {
                 const spec = candidate.plan.spec
+                // kilocode_change start - a plugin routed to the extension host is not a load failure
+                if (stage === "trust" && hostedSpecs.has(spec)) return
+                // kilocode_change end
                 const cause = error instanceof Error ? (error.cause ?? error) : error
                 const message = stage === "load" ? errorMessage(error) : errorMessage(cause)
 

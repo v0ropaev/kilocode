@@ -104,7 +104,7 @@ export namespace SecurityGate {
     const enabled = yield* SecurityFlag.enabled(input.config)
     const layers: SecurityFlag.Layers = enabled
       ? yield* SecurityFlag.layers(input.config)
-      : { packages: false, egress: false, tools: false, content: false, code: false }
+      : { packages: false, egress: false, tools: false, content: false, code: false, runtime: false }
     const declarations = enabled && layers.tools ? yield* SecurityFlag.declarations(input.config) : []
     const result: Options = { enabled, sandboxed: input.sandboxed, workspace: input.workspace, layers, declarations }
     return result
@@ -354,7 +354,14 @@ export namespace SecurityGate {
       home: Global.Path.home,
       sandbox: { enabled: input.options.sandboxed },
     }
-    const layers = input.options.layers ?? { packages: false, egress: false, tools: false, content: false, code: false }
+    const layers = input.options.layers ?? {
+      packages: false,
+      egress: false,
+      tools: false,
+      content: false,
+      code: false,
+      runtime: false,
+    }
     const callID = input.request.tool?.callID
     const started = performance.now()
     const exit = yield* Effect.exit(

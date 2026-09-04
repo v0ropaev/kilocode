@@ -348,6 +348,16 @@ export const Info = Schema.Struct({
         description:
           "SHA-256 digests of project tool/plugin files you have reviewed and allow Kilo to import. Approval is keyed by content, so editing an approved file revokes it. Global config only.",
       }),
+      security_auto_extension_runtime: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Security Auto Mode layer: run approved project extensions (custom tools, project plugins) in a permissioned host process instead of the main Kilo process, so their privileged effects go through the security engine. On by default when security_auto is on; set false to disable. Global config only.",
+      }),
+      security_auto_extension_grants: Schema.optional(
+        Schema.Record(Schema.String, Schema.mutable(Schema.Array(Schema.String))),
+      ).annotate({
+        description:
+          'Capabilities granted per approved extension digest, e.g. {"<sha256>": ["filesystem-write","network"]}. Approving an extension\'s code does not grant these; without an entry an extension gets read-only capability. Global config only.',
+      }),
       security_auto_tool_capabilities: Schema.optional(
         Schema.Record(Schema.String, Schema.mutable(Schema.Array(Schema.String))),
       ).annotate({
