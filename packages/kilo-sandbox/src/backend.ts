@@ -131,3 +131,15 @@ export function prepareLaunch(profile: Profile, launch: Launch) {
 export function backendSupport(network?: Profile["network"]) {
   return backend.support(network)
 }
+
+/**
+ * Whether this platform can actually confine a process's ambient reads (`Profile.filesystem.allowRead`).
+ * Seatbelt and Bubblewrap both can; every other platform cannot, and callers that depend on it are
+ * expected to fail safe rather than run unconfined.
+ */
+export function readConfinementSupport(network?: Profile["network"]): Support {
+  if (process.platform !== "darwin" && process.platform !== "linux") {
+    return { available: false, reason: `Read confinement is not implemented on ${process.platform}` }
+  }
+  return backend.support(network)
+}
