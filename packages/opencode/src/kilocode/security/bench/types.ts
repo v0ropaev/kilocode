@@ -23,7 +23,11 @@ import type { SecurityGate } from "@/kilocode/security/gate"
  * - `content-secret-detection`: + secret classification of ordinary workspace content;
  * - `executable-code-trust`: + trust boundary for repository-controlled executable code;
  * - `permissioned-extension-runtime`: + permissioned host process for approved extensions;
- * - `read-confined-extension-runtime`: + ambient reads confined to the extension's working set.
+ * - `read-confined-extension-runtime`: + ambient reads confined to the extension's working set;
+ * - `llm-advisory`: + the opt-in advisory model review of unsettled outbound actions.
+ *
+ * The last rung is not part of Security Auto Mode as shipped: it is off by default, and it is
+ * measured as its own row precisely so the cost of turning it on can be read next to the row above.
  */
 export type BenchConfig =
   | "baseline"
@@ -35,6 +39,7 @@ export type BenchConfig =
   | "executable-code-trust"
   | "permissioned-extension-runtime"
   | "read-confined-extension-runtime"
+  | "llm-advisory"
 
 export const BENCH_CONFIGS: readonly BenchConfig[] = [
   "baseline",
@@ -46,6 +51,7 @@ export const BENCH_CONFIGS: readonly BenchConfig[] = [
   "executable-code-trust",
   "permissioned-extension-runtime",
   "read-confined-extension-runtime",
+  "llm-advisory",
 ]
 
 export const CONFIG_LABELS: Record<BenchConfig, string> = {
@@ -58,6 +64,7 @@ export const CONFIG_LABELS: Record<BenchConfig, string> = {
   "executable-code-trust": "+ Executable Code Trust",
   "permissioned-extension-runtime": "+ Permissioned Extension Runtime",
   "read-confined-extension-runtime": "+ Read-Confinement",
+  "llm-advisory": "+ LLM Advisory (opt-in)",
 }
 
 export type ScenarioCategory =

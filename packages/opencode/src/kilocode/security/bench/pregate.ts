@@ -265,7 +265,7 @@ export namespace BenchPreGate {
           enabled: true,
           sandboxed: false,
           workspace: { directory: input.workspace, worktree: input.workspace },
-          layers: { packages: true, egress: true, tools: true, content: true, code: true, runtime: true },
+          layers: { packages: true, egress: true, tools: true, content: true, code: true, runtime: true, classifier: false },
         },
         allowUnconfinedReads: input.readConfinement !== true,
       }).catch(() => undefined)

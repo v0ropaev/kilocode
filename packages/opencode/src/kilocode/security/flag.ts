@@ -29,6 +29,16 @@ export namespace SecurityFlag {
     code: boolean
     /** Permissioned host process for approved project extensions. */
     runtime: boolean
+    /**
+     * Advisory model review of outbound actions the deterministic layers left unsettled.
+     *
+     * The one layer that is **off** by default with the mode on. Every other layer is deterministic,
+     * costs microseconds and is part of what Security Auto Mode means; this one adds a model
+     * round-trip to a live decision, so it is a deliberate opt-in rather than something a user
+     * discovers by watching their agent stall. With it off, the mode behaves exactly as it does
+     * without this code.
+     */
+    classifier: boolean
   }
 
   function truthy(value: string | undefined) {
@@ -52,6 +62,13 @@ export namespace SecurityFlag {
     return configured !== false
   }
 
+  /** Opt-in layer: the same resolution order, but silence means off rather than on. */
+  function optIn(env: string | undefined, configured: boolean | undefined) {
+    if (truthy(env)) return true
+    if (falsy(env)) return false
+    return configured === true
+  }
+
   /** Which layers are active. Meaningful only when {@link enabled} is true. */
   export const layers = Effect.fn("SecurityFlag.layers")(function* (config: Pick<Config.Interface, "getGlobal">) {
     const global = yield* config.getGlobal().pipe(Effect.catch(() => Effect.succeed(undefined)))
@@ -65,9 +82,19 @@ export namespace SecurityFlag {
         process.env["KILO_SECURITY_AUTO_EXTENSION_RUNTIME"],
         global?.experimental?.security_auto_extension_runtime,
       ),
+      classifier: optIn(process.env["KILO_SECURITY_AUTO_CLASSIFIER"], global?.experimental?.security_auto_classifier),
     }
     return result
   })
+
+  /**
+   * How long a decision may wait on the advisory model before the deterministic answer stands.
+   * `KILO_SECURITY_AUTO_CLASSIFIER_TIMEOUT_MS`, default 300 ms — the budget the design note names.
+   */
+  export function classifierTimeoutMs(): number {
+    const raw = Number(process.env["KILO_SECURITY_AUTO_CLASSIFIER_TIMEOUT_MS"])
+    return Number.isFinite(raw) && raw > 0 ? raw : 300
+  }
 
   /**
    * Is the executable-code trust boundary active? Resolved on its own because the loaders that need

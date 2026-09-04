@@ -362,6 +362,10 @@ export const Info = Schema.Struct({
         description:
           "Accept extension hosts with ambient read access to your files: it turns read confinement off where the platform supports it, and lets an approved extension run where it does not (by default the host refuses to start there rather than reading whatever you can). Global config only.",
       }),
+      security_auto_classifier: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Security Auto Mode experiment: send outbound actions the deterministic layers left unsettled to a small model, which may raise them to an ask a person has to answer. It can only tighten a decision, never relax one, and it is never asked about a denial or an action the engine already settled. OFF by default even when security_auto is on, because it adds a model round-trip to those actions; set true to enable. Global config only.",
+      }),
       security_auto_tool_capabilities: Schema.optional(
         Schema.Record(Schema.String, Schema.mutable(Schema.Array(Schema.String))),
       ).annotate({

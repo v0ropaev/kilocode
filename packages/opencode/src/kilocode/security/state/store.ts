@@ -77,6 +77,36 @@ export namespace SecuritySessionState {
     source?: string
   }
 
+  /**
+   * Where a piece of text the agent read actually came from. This is the question the deterministic
+   * layers never ask: they classify the *resource* a path names, not who wrote the words inside it.
+   * A README, a dependency's README and a fetched page are all "ordinary workspace content" to the
+   * path classifier, and all three are written by someone who is not the user.
+   */
+  export type ContentSource =
+    | "workspace-file"
+    | "source-comment"
+    | "dependency"
+    | "notebook"
+    | "ci-config"
+    | "skill"
+    | "mcp"
+    | "web"
+    | "tool"
+
+  /**
+   * A bounded excerpt of untrusted text the agent obtained, kept only so a later action can be judged
+   * against what the session was told. Never logged, never persisted, never leaves the process except
+   * to a classifier provider the user opted into.
+   */
+  export interface Ingested {
+    source: ContentSource
+    /** Basename only: the directory carries the user's identity and none of the meaning. */
+    name: string
+    excerpt: string
+    at: number
+  }
+
   interface State {
     root: string
     salt: string
@@ -87,6 +117,12 @@ export namespace SecuritySessionState {
     values: Set<string>
     events: Event[]
     pending: Map<string, Pending & { at: number }>
+    ingested: Ingested[]
+    /**
+     * What the user asked for this turn, in the user's own words, bounded. Trusted in the sense that
+     * the user typed it — never in the sense that it grants anything. Absent unless recorded.
+     */
+    goal?: string
   }
 
   export interface Snapshot {
@@ -106,6 +142,11 @@ export namespace SecuritySessionState {
   const MAX_TAINTED = 2048
   const MAX_VALUES = 20_000
   const MAX_PENDING = 64
+  /** How many untrusted excerpts a session keeps, and how much of each. Bounded on purpose: this is
+   *  a window on what the agent was recently told, not a transcript. */
+  const MAX_INGESTED = 8
+  const EXCERPT_LIMIT = 2_000
+  const GOAL_LIMIT = 500
 
   const states = new Map<string, State>()
   let resolver: (sessionID: string) => string = (sessionID) => sessionID
@@ -172,6 +213,7 @@ export namespace SecuritySessionState {
       values: new Set(),
       events: [],
       pending: new Map(),
+      ingested: [],
     }
     states.set(root, state)
     return state
@@ -196,6 +238,43 @@ export namespace SecuritySessionState {
     const base = target.canonical.split(/[\\/]/).at(-1) ?? ""
     if (out.has("secret") && /\.(production|prod)(\.|$)/i.test(base)) out.add("production-config")
     return [...out]
+  }
+
+  /**
+   * Remember that the agent read untrusted text. Content only — no decision, no classification, no
+   * model call: this runs on the hot path of every completed read, so it must stay a bounded copy.
+   */
+  export function recordIngested(sessionID: string, item: Omit<Ingested, "at">) {
+    const excerpt = item.excerpt.slice(0, EXCERPT_LIMIT)
+    if (excerpt.trim().length === 0) return
+    const now = Date.now()
+    const state = open(sessionID, now)
+    state.ingested.push({ ...item, excerpt, at: now })
+    if (state.ingested.length > MAX_INGESTED) state.ingested.splice(0, state.ingested.length - MAX_INGESTED)
+    touch(state, now)
+  }
+
+  /** The untrusted text this session has read, newest last. */
+  export function ingestedOf(sessionID: string): readonly Ingested[] {
+    return get(sessionID)?.ingested ?? []
+  }
+
+  /**
+   * Record what the user asked for, in their own words. Evidence about intent, never authority: a
+   * request that matches a dangerous action does not make the action allowed, it only makes the
+   * mismatch signal quieter.
+   */
+  export function recordGoal(sessionID: string, text: string) {
+    const goal = text.trim().slice(0, GOAL_LIMIT)
+    if (goal.length === 0) return
+    const now = Date.now()
+    const state = open(sessionID, now)
+    state.goal = goal
+    touch(state, now)
+  }
+
+  export function goalOf(sessionID: string): string | undefined {
+    return get(sessionID)?.goal
   }
 
   /** True once the session obtained the contents of at least one sensitive resource. */

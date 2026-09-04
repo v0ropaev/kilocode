@@ -39,7 +39,7 @@ function options(): SecurityGate.Options {
     enabled: true,
     sandboxed: false,
     workspace: { directory: ws, worktree: ws },
-    layers: { packages: false, egress: true, tools: true, content: true, code: true, runtime: true },
+    layers: { packages: false, egress: true, tools: true, content: true, code: true, runtime: true, classifier: false },
   }
 }
 
