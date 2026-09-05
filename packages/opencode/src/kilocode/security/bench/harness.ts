@@ -38,6 +38,7 @@ import * as Tool from "@/tool/tool"
 import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
 import { Schema } from "effect"
+import { SemanticEvidence } from "@/kilocode/security/classifier/layers"
 import { SecurityGate } from "@/kilocode/security/gate"
 import { SecurityKeys } from "@/kilocode/security/keys"
 import { PackageMetadata } from "@/kilocode/security/package/metadata"
@@ -227,14 +228,30 @@ export namespace BenchHarness {
     }),
   )
 
+  /**
+   * The rung a configuration inherits its product behaviour from.
+   *
+   * `llm-advisory` is the shipped top rung plus one opt-in flag: everything else about it — the code
+   * trust boundary, the extension host, read confinement — must be identical, or the row stops being
+   * a measurement of the advisory and becomes a measurement of a different product. Resolving that
+   * here means the answer is given once, instead of in each of the name lists below (which is exactly
+   * where it was first got wrong).
+   */
+  function productRung(config: BenchConfig): BenchConfig {
+    return config === "llm-advisory" ? "read-confined-extension-runtime" : config
+  }
+
   /** Configurations in which the executable-code trust boundary is active. */
-  const trustingConfigs = new Set<BenchConfig>([
+  const trusting = new Set<BenchConfig>([
     "executable-code-trust",
     "permissioned-extension-runtime",
     "read-confined-extension-runtime",
   ])
   /** Configurations in which an approved workspace extension is evaluated in the permissioned host. */
-  const hostingConfigs = new Set<BenchConfig>(["permissioned-extension-runtime", "read-confined-extension-runtime"])
+  const hosting = new Set<BenchConfig>(["permissioned-extension-runtime", "read-confined-extension-runtime"])
+
+  const trustingConfigs = { has: (config: BenchConfig) => trusting.has(productRung(config)) }
+  const hostingConfigs = { has: (config: BenchConfig) => hosting.has(productRung(config)) }
 
   /** The single knob: what the global config says for each configuration of the ablation ladder. */
   export function flagsFor(config: BenchConfig) {
@@ -251,6 +268,10 @@ export namespace BenchHarness {
       // The rung below read confinement is the runtime as it was: hosted, but reading whatever the
       // user can. The user-facing flag that accepts that is the one knob these two rows differ by.
       unconfinedReads = true,
+      // The advisory is the one layer that is off unless a rung asks for it: every configuration
+      // below the last must be byte-for-byte the shipped behaviour, model calls included (there are
+      // none). Reading `false` here is what makes "the ladder measures the product" true.
+      classifier = false,
     ) => ({
       experimental: {
         security_auto: true,
@@ -261,6 +282,7 @@ export namespace BenchHarness {
         security_auto_code: code,
         security_auto_extension_runtime: runtime,
         security_auto_extension_unconfined_reads: runtime ? unconfinedReads : false,
+        security_auto_classifier: classifier,
         ...declared,
       },
     })
@@ -283,6 +305,8 @@ export namespace BenchHarness {
         return on(true, true, true, true, true, true)
       case "read-confined-extension-runtime":
         return on(true, true, true, true, true, true, false)
+      case "llm-advisory":
+        return on(true, true, true, true, true, true, false, true)
     }
   }
 
@@ -558,7 +582,7 @@ export namespace BenchHarness {
         codeTrust: config !== "baseline" && trustingConfigs.has(config),
         mcpAppsAllowed: !trustingConfigs.has(config),
         extensionRuntime: hostingConfigs.has(config),
-        extensionReadConfinement: config === "read-confined-extension-runtime",
+        extensionReadConfinement: productRung(config) === "read-confined-extension-runtime",
         path: (...segments) => sandbox.resolve(...segments),
       }
 
@@ -590,6 +614,10 @@ export namespace BenchHarness {
       // Each run is a fresh session for the stateful egress layer; ids are already unique per run, this
       // also frees any state a previous run under the same id might have left.
       SecuritySessionState.reset(sessionID)
+      // The user's own request for this turn, when the scenario declares one. The product records it
+      // from the live turn; the benchmark records it here so goal-dependent signals run on the same
+      // path rather than being simulated.
+      if (scenario.goal) SecuritySessionState.recordGoal(sessionID, scenario.goal)
       human.approve = false
       human.approvals = 0
       hooks.before = scenarioInstance.pluginHook
@@ -623,6 +651,7 @@ export namespace BenchHarness {
             security_auto_code: boolean
             security_auto_extension_runtime: boolean
             security_auto_extension_unconfined_reads: boolean
+            security_auto_classifier: boolean
             security_auto_tool_capabilities: Record<string, string[]>
           }
           const options: SecurityGate.Options = {
@@ -636,6 +665,7 @@ export namespace BenchHarness {
               content: flags.security_auto_content,
               code: flags.security_auto_code,
               runtime: flags.security_auto_extension_runtime,
+              classifier: flags.security_auto_classifier,
             },
             declarations: ToolCapability.declarations(flags.security_auto_tool_capabilities),
           }
@@ -741,6 +771,17 @@ export namespace BenchHarness {
     collector: BenchCollector.Handle
   }
 
+  /**
+   * Advisory cost per configuration. Kept next to the results rather than derived from them: a call
+   * that timed out or failed leaves no trace in a decision, and "the model was asked and said
+   * nothing" has to be distinguishable from "the model was never asked".
+   */
+  const classifierCost = new Map<BenchConfig, SemanticEvidence.Stats>()
+
+  export function classifierStats(): ReadonlyMap<BenchConfig, SemanticEvidence.Stats> {
+    return classifierCost
+  }
+
   /** Run every scenario × run for one configuration, sharing a single service/registry build. */
   export function runSuite(input: SuiteInput & { config: BenchConfig }) {
     const jobs: RunOneInput[] = []
@@ -756,7 +797,11 @@ export namespace BenchHarness {
       }
     }
     // Sequential: fair latency, and no races on the shared collector / PATH / decision observer.
-    return Effect.forEach(jobs, runOne, { concurrency: 1 }).pipe(Effect.provide(registryLayer(input.config)))
+    SemanticEvidence.reset()
+    return Effect.forEach(jobs, runOne, { concurrency: 1 }).pipe(
+      Effect.provide(registryLayer(input.config)),
+      Effect.tap(() => Effect.sync(() => classifierCost.set(input.config, SemanticEvidence.snapshot()))),
+    )
   }
 
   /** Run the configurations in ladder order (default: all four) on the same sandbox. */

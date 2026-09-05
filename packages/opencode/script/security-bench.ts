@@ -75,6 +75,10 @@ const { Global } = await import("@opencode-ai/core/global")
 const { BenchHarness } = await import("@/kilocode/security/bench/harness")
 const { BenchScenarios } = await import("@/kilocode/security/bench/scenarios")
 const { BenchMetrics } = await import("@/kilocode/security/bench/metrics")
+// The ablation must be reproducible with no network and no key, so the offline stand-in is the
+// default here even though the product's default is the model the user configured. Override it to
+// run the same ladder against a real model.
+process.env["KILO_SECURITY_AUTO_CLASSIFIER_PROVIDER"] ??= "heuristic"
 const { BenchReport } = await import("@/kilocode/security/bench/report")
 const { BenchCollector } = await import("@/kilocode/security/bench/collector")
 const { BenchIsolation } = await import("@/kilocode/security/bench/isolation")
@@ -127,7 +131,28 @@ const report = BenchMetrics.aggregate({
   generatedAt: new Date().toISOString(),
   configs,
 })
-const markdown = BenchReport.toMarkdown(report)
+const advisory = [...BenchHarness.classifierStats().entries()].filter(([, stats]) => stats.calls > 0)
+const advisorySection = advisory.length
+  ? [
+      "",
+      "## LLM advisory cost (opt-in layer)",
+      "",
+      "| Configuration | Considered | Model calls | Calls per decision | Flagged | Errors | Timeouts | Advisory p50 | Advisory p95 |",
+      "| --- | --: | --: | --: | --: | --: | --: | --: | --: |",
+      ...advisory.map(([config, stats]) => {
+        const sorted = [...stats.latencies].sort((a, b) => a - b)
+        const q = (p: number) =>
+          sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))] : 0
+        const decisions = results.filter((r) => r.config === config).reduce((n, r) => n + r.decisions.length, 0)
+        const rate = decisions > 0 ? (stats.calls / decisions).toFixed(2) : "n/a"
+        return `| ${config} | ${stats.considered} | ${stats.calls} | ${rate} | ${stats.flagged} | ${stats.errors} | ${stats.timeouts} | ${q(50).toFixed(2)} ms | ${q(95).toFixed(2)} ms |`
+      }),
+      "",
+      `_Provider: ${process.env["KILO_SECURITY_AUTO_CLASSIFIER_PROVIDER"] ?? "heuristic"}._`,
+    ].join("\n")
+  : ""
+
+const markdown = BenchReport.toMarkdown(report) + advisorySection
 const jsonl = BenchReport.toJsonl(results)
 
 const outDir = arg("out", path.join(import.meta.dir, "..", ".artifacts", "security-bench", tag ?? "latest"))!

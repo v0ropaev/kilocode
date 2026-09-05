@@ -30,6 +30,13 @@ contribution of every layer is measurable on its own:
 | `executable-code-trust` | `+ security_auto_code` | trust boundary for repository-controlled executable code |
 | `permissioned-extension-runtime` | `+ security_auto_extension_runtime` | permissioned host process for approved extensions, reads left open |
 | `read-confined-extension-runtime` | `− security_auto_extension_unconfined_reads` | that host's ambient reads confined to the extension's working set |
+| `llm-advisory` | `+ security_auto_classifier` | semantic review of unsettled actions: an instruction planted in untrusted text, or an action that has nothing to do with what the user asked for |
+
+The last rung is part of Security Auto Mode as shipped. It is a separate row so its contribution can
+be read directly against the row above it, which is identical in every other respect. The benchmark
+pins the offline stand-in provider so a run needs no network and no key; set
+`KILO_SECURITY_AUTO_CLASSIFIER_PROVIDER` to run the same ladder against a real model. See
+`security-auto-mode-llm-layers.md`.
 
 `--configs baseline,deterministic-security,package-security` runs a subset; the no-arg run does the whole ladder.
 `--scenario a,b*,c` selects a subset by id or prefix.

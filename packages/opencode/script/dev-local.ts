@@ -15,18 +15,38 @@ import net from "node:net"
 
 const kilo = path.resolve(import.meta.dir, "../../..")
 const home = path.join(os.homedir(), ".kilo-dev")
-const dim = "\x1b[2m", red = "\x1b[31m", grn = "\x1b[32m", ylw = "\x1b[33m", rst = "\x1b[0m"
+const dim = "\x1b[2m",
+  red = "\x1b[31m",
+  grn = "\x1b[32m",
+  ylw = "\x1b[33m",
+  rst = "\x1b[0m"
 
 function die(m: string): never {
   console.error(`${red}${m}${rst}`)
   process.exit(1)
 }
-const read = (f: string) => { try { return fs.readFileSync(f, "utf-8").trim() } catch { return undefined } }
+const read = (f: string) => {
+  try {
+    return fs.readFileSync(f, "utf-8").trim()
+  } catch {
+    return undefined
+  }
+}
 function alive(port: number, ms = 2000) {
   return new Promise<boolean>((res) => {
-    const s = net.connect({ port, host: "127.0.0.1" }, () => { clearTimeout(t); s.destroy(); res(true) })
-    const t = setTimeout(() => { s.destroy(); res(false) }, ms)
-    s.on("error", () => { clearTimeout(t); res(false) })
+    const s = net.connect({ port, host: "127.0.0.1" }, () => {
+      clearTimeout(t)
+      s.destroy()
+      res(true)
+    })
+    const t = setTimeout(() => {
+      s.destroy()
+      res(false)
+    }, ms)
+    s.on("error", () => {
+      clearTimeout(t)
+      res(false)
+    })
   })
 }
 
@@ -69,8 +89,15 @@ async function main() {
   if (!webPort) die(`no web port found in ${cloud} — is the dev server started? (pnpm dev:start)`)
 
   const env: NodeJS.ProcessEnv = { ...process.env }
-  for (const [k, d] of [["XDG_DATA_HOME", "data"], ["XDG_CONFIG_HOME", "config"], ["XDG_STATE_HOME", "state"], ["XDG_CACHE_HOME", "cache"]] as const) {
-    const p = path.join(home, d); fs.mkdirSync(p, { recursive: true }); env[k] = p
+  for (const [k, d] of [
+    ["XDG_DATA_HOME", "data"],
+    ["XDG_CONFIG_HOME", "config"],
+    ["XDG_STATE_HOME", "state"],
+    ["XDG_CACHE_HOME", "cache"],
+  ] as const) {
+    const p = path.join(home, d)
+    fs.mkdirSync(p, { recursive: true })
+    env[k] = p
   }
   env.KILO_API_URL = `http://localhost:${webPort}`
   env.KILO_DEV_CWD = project
@@ -90,10 +117,20 @@ async function main() {
   console.log(`${dim}events${rst}   ${eventsPort ? `:${eventsPort}` : "off"}`)
   console.log(`${dim}home${rst}     ${home}`)
 
-  if (dry) { if (!webUp) console.warn(`${ylw}web down — start it (pnpm dev:start)${rst}`); return }
+  if (dry) {
+    if (!webUp) console.warn(`${ylw}web down — start it (pnpm dev:start)${rst}`)
+    return
+  }
   if (!webUp) die(`web on :${webPort} is not responding — start it first (pnpm dev:start)`)
 
-  process.exit(await Bun.spawn({ cmd: ["bun", "run", "--cwd", "packages/opencode", "--conditions=browser", "src/index.ts", ...pass], cwd: kilo, env, stdio: ["inherit", "inherit", "inherit"] }).exited)
+  process.exit(
+    await Bun.spawn({
+      cmd: ["bun", "run", "--cwd", "packages/opencode", "--conditions=browser", "src/index.ts", ...pass],
+      cwd: kilo,
+      env,
+      stdio: ["inherit", "inherit", "inherit"],
+    }).exited,
+  )
 }
 
 void main().catch((e) => die(e instanceof Error ? e.message : String(e)))

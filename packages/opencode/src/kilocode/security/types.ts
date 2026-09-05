@@ -71,6 +71,8 @@ export type PathLabel =
   | "kilo-config"
   | "kilo-state"
   | "device"
+  /** A device that discards or synthesises data (`/dev/null`, `/dev/zero`, a tty, a pipe fd). */
+  | "device-safe"
   | "glob"
   | "workspace-ancestor"
 
@@ -317,6 +319,11 @@ export interface SecurityDecision {
   canRetry: boolean
   evidence: SecurityEvidence[]
   alternatives: SafeAlternative[]
+  /**
+   * One plain sentence for the person being asked, built from this decision after it was final.
+   * Presentation only: nothing reads it back, and it can never change what was decided.
+   */
+  explanation?: string
 }
 
 /** Structured result returned to the agent instead of a fatal error when an action is denied. */

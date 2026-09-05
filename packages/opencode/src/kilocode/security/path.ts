@@ -350,13 +350,9 @@ export namespace PathRisk {
 
   function systemLabels(value: string): PathLabel[] {
     const out: PathLabel[] = []
-    if (
-      value.startsWith("/dev/") &&
-      !DEVICE_SAFE.has(value) &&
-      !value.startsWith("/dev/fd/") &&
-      !/^\/dev\/(tty|pts)/.test(value)
-    )
-      out.push("device")
+    const harmlessDevice = DEVICE_SAFE.has(value) || value.startsWith("/dev/fd/") || /^\/dev\/(tty|pts)/.test(value)
+    if (value.startsWith("/dev/") && !harmlessDevice) out.push("device")
+    if (harmlessDevice) out.push("device-safe")
     if (SYSTEM_PERSISTENCE.some((item) => value === item || value.startsWith(item + "/"))) out.push("shell-persistence")
     return out
   }

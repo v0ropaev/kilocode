@@ -23,7 +23,11 @@ import type { SecurityGate } from "@/kilocode/security/gate"
  * - `content-secret-detection`: + secret classification of ordinary workspace content;
  * - `executable-code-trust`: + trust boundary for repository-controlled executable code;
  * - `permissioned-extension-runtime`: + permissioned host process for approved extensions;
- * - `read-confined-extension-runtime`: + ambient reads confined to the extension's working set.
+ * - `read-confined-extension-runtime`: + ambient reads confined to the extension's working set;
+ * - `llm-advisory`: + the opt-in advisory model review of unsettled outbound actions.
+ *
+ * The last rung is not part of Security Auto Mode as shipped: it is off by default, and it is
+ * measured as its own row precisely so the cost of turning it on can be read next to the row above.
  */
 export type BenchConfig =
   | "baseline"
@@ -35,6 +39,7 @@ export type BenchConfig =
   | "executable-code-trust"
   | "permissioned-extension-runtime"
   | "read-confined-extension-runtime"
+  | "llm-advisory"
 
 export const BENCH_CONFIGS: readonly BenchConfig[] = [
   "baseline",
@@ -46,6 +51,7 @@ export const BENCH_CONFIGS: readonly BenchConfig[] = [
   "executable-code-trust",
   "permissioned-extension-runtime",
   "read-confined-extension-runtime",
+  "llm-advisory",
 ]
 
 export const CONFIG_LABELS: Record<BenchConfig, string> = {
@@ -58,6 +64,7 @@ export const CONFIG_LABELS: Record<BenchConfig, string> = {
   "executable-code-trust": "+ Executable Code Trust",
   "permissioned-extension-runtime": "+ Permissioned Extension Runtime",
   "read-confined-extension-runtime": "+ Read-Confinement",
+  "llm-advisory": "+ LLM Advisory (opt-in)",
 }
 
 export type ScenarioCategory =
@@ -88,6 +95,7 @@ export type ScenarioCategory =
   | "attack-extension-runtime"
   | "attack-extension-read"
   | "attack-workspace-secret"
+  | "attack-goal-mismatch"
   | "attack-device"
 
 /** Categories that make up the package-specific ASR. */
@@ -220,6 +228,14 @@ export interface Scenario {
   expectedProtected?: "deny" | "hard-ask" | "soft-ask-or-allow"
   /** Cross-links a paired scenario (agent-initiated ↔ user-requested), for the intent analysis. */
   pairedWith?: string
+  /**
+   * What the user asked for this turn, in their own words. Recorded into session state before the
+   * trajectory runs, exactly as the product records it from a real turn.
+   *
+   * Evidence about intent, never authority: a scenario whose goal names the dangerous action is still
+   * adjudicated by the same rules, which is what `atk-ssh-write-user-requested` exists to demonstrate.
+   */
+  goal?: string
   /** The layer the scenario primarily exercises (for the per-layer breakdown). */
   layer?: "deterministic" | "packages" | "egress" | "tools" | "content" | "code" | "runtime" | "pre-gate" | "residual"
   build(ctx: ScenarioContext): Effect.Effect<ScenarioInstance>

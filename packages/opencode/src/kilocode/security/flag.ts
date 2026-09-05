@@ -29,6 +29,15 @@ export namespace SecurityFlag {
     code: boolean
     /** Permissioned host process for approved project extensions. */
     runtime: boolean
+    /**
+     * Semantic review of actions the deterministic layers left unsettled.
+     *
+     * On with the mode, like every other layer — but what actually switches it on is whether a model
+     * provider resolves. With none configured the layer returns nothing on every call, which is the
+     * same behaviour as running without this code at all. So "is the AI on" is answered by the
+     * model the user already set up, not by a second flag they have to find.
+     */
+    classifier: boolean
   }
 
   function truthy(value: string | undefined) {
@@ -65,9 +74,19 @@ export namespace SecurityFlag {
         process.env["KILO_SECURITY_AUTO_EXTENSION_RUNTIME"],
         global?.experimental?.security_auto_extension_runtime,
       ),
+      classifier: layer(process.env["KILO_SECURITY_AUTO_CLASSIFIER"], global?.experimental?.security_auto_classifier),
     }
     return result
   })
+
+  /**
+   * How long a decision may wait on the advisory model before the deterministic answer stands.
+   * `KILO_SECURITY_AUTO_CLASSIFIER_TIMEOUT_MS`, default 300 ms — the budget the design note names.
+   */
+  export function classifierTimeoutMs(): number {
+    const raw = Number(process.env["KILO_SECURITY_AUTO_CLASSIFIER_TIMEOUT_MS"])
+    return Number.isFinite(raw) && raw > 0 ? raw : 300
+  }
 
   /**
    * Is the executable-code trust boundary active? Resolved on its own because the loaders that need

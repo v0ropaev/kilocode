@@ -151,6 +151,9 @@ describe("metric calculations", () => {
       "executable-code-trust",
       "permissioned-extension-runtime",
       "read-confined-extension-runtime",
+      // The opt-in advisory sits above the shipped ladder: it is a rung of the measurement, not of
+      // the product, and every rung below it must stay exactly what Security Auto Mode does.
+      "llm-advisory",
     ])
     expect(report.configs.find((c) => c.config === "stateful-egress")!.asr.rate).toBeNull()
   })

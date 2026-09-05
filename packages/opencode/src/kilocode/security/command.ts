@@ -2103,20 +2103,32 @@ export namespace CommandSemantics {
             .filter((arg) => arg.startsWith("--output=") || arg.startsWith("--output-document="))
             .map((arg) => arg.slice(arg.indexOf("=") + 1)),
         )
-      const upload = argv
-        .filter(
-          (_, i) =>
-            i > 0 &&
-            ["-t", "--upload-file", "-d", "--data", "--data-binary", "-f", "--form", "-infile", "-body"].includes(
-              prev(i),
-            ) &&
-            !(argv[i - 1] === "-t" && name !== "curl"),
-        )
-        .map((arg) => arg.replace(/^@/, ""))
-        .filter((_, i, arr) => arr.length > 0)
+      const upload = argv.filter(
+        (_, i) =>
+          i > 0 &&
+          [
+            "-t",
+            "--upload-file",
+            "-d",
+            "--data",
+            "--data-binary",
+            "--data-urlencode",
+            "-f",
+            "-F",
+            "--form",
+            "-infile",
+            "-body",
+          ].includes(prev(i)) &&
+          !(argv[i - 1] === "-t" && name !== "curl"),
+      )
+      // Extract the payload file from curl's operand syntaxes: `@file` (`--data-binary`),
+      // `field=@file` (`-F`), `name@file` (`--data-urlencode`), or a bare path (`--upload-file`).
       const files = upload
-        .filter((arg) => arg.startsWith("@") || /^[./~]/.test(arg))
-        .map((arg) => arg.replace(/^@/, ""))
+        .map((arg) => {
+          const at = arg.lastIndexOf("@")
+          return at >= 0 ? arg.slice(at + 1) : arg
+        })
+        .filter((value, i) => upload[i].includes("@") || /^[./~]/.test(value))
       return {
         ...EMPTY,
         effect: out.length > 0 ? "write" : undefined,
