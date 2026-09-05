@@ -46,6 +46,10 @@ const ALL_MODES: SemanticEvidence.Sensitivity[] = ["conservative", "balanced"]
 const modes = requested === "both" ? ALL_MODES : ALL_MODES.filter((mode) => mode === requested)
 if (modes.length === 0) throw new Error(`--sensitivity expects conservative, balanced or both`)
 
+// Offline by default, like the benchmark: a scored run must be reproducible with no key and no
+// network. The product's default provider is the model the user configured, and with none reachable
+// it correctly contributes nothing — which would print as a page of zeroes and read like a result.
+process.env["KILO_SECURITY_AUTO_CLASSIFIER_PROVIDER"] ??= "heuristic"
 const provider = providerFromEnv() ?? new HeuristicProvider()
 const sets = { development: DEVELOPMENT, "held-out": HELD_OUT } as const
 const pct = (value: number) => `${Math.round(value * 100)}%`
