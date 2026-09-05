@@ -29,9 +29,10 @@
  */
 import { Effect } from "effect"
 import { Decision } from "../decision"
+import { SecretContent } from "../state/content"
 import { SecuritySessionState } from "../state/store"
 import type { NormalizedAction, NormalizedPath, SecurityDecision, SecurityEvidence } from "../types"
-import type { ClassifierProvider } from "./provider"
+import { ClassifierBreaker, type ClassifierProvider } from "./provider"
 import type { SemanticInput, Verdict } from "./schema"
 
 export namespace SemanticEvidence {
@@ -61,7 +62,7 @@ export namespace SemanticEvidence {
   }
 
   export function reset() {
-    consecutiveFailures = 0
+    ClassifierBreaker.reset()
     stats.calls = 0
     stats.flagged = 0
     stats.errors = 0
@@ -115,15 +116,54 @@ export namespace SemanticEvidence {
     return segment ? segment.slice(1).toLowerCase() : undefined
   }
 
+  /**
+   * Redaction, applied at the point the data leaves.
+   *
+   * The excerpts are text the agent read, and text the agent read can contain a credential — not
+   * because it went looking for one, but because a repository file had one in it. The model does not
+   * need the value: the question is what the text *tells the agent to do*, and that survives having
+   * the value replaced. The same goes for the request, which is the user's own words and can contain
+   * a token they pasted.
+   *
+   * Done here rather than at the recording site because here is the only place the data crosses the
+   * boundary, which makes the guarantee checkable in one test: put a synthetic credential in an
+   * excerpt, and assert the provider never sees it.
+   */
+  export function redact(text: string): string {
+    const found = SecretContent.classify(text)
+    let out = text
+    // Short matches are skipped: replacing a six-character string everywhere damages the text the
+    // model has to read, and a secret that short is not one.
+    for (const value of found.values) if (value.length >= 8) out = out.replaceAll(value, "[redacted]")
+    return out
+  }
+
+  /**
+   * Apply the redaction to an already-assembled input.
+   *
+   * Exported for the evaluation, which builds inputs by hand: a corpus scored on text the product
+   * would never send is measuring a pipeline that does not exist. Some of its cases turn on a file
+   * holding credentials, and in production the model sees the key names with the values replaced —
+   * so that is what the evaluation must show it too.
+   */
+  export function redactInput(input: SemanticInput): SemanticInput {
+    return {
+      action: input.action,
+      provenance: input.provenance.map((item) => ({ ...item, excerpt: redact(item.excerpt) })),
+      ...(input.goal ? { goal: redact(input.goal) } : {}),
+    }
+  }
+
   /** Assemble what the model is shown. Structure and bounded excerpts; never a command line. */
   export function summarize(action: NormalizedAction, sessionID: string): SemanticInput | undefined {
     const readSecret = SecuritySessionState.hasSecretContext(sessionID)
     const provenance = SecuritySessionState.ingestedOf(sessionID).map((item) => ({
       source: item.source,
       name: item.name,
-      excerpt: item.excerpt,
+      excerpt: redact(item.excerpt),
     }))
-    const goal = SecuritySessionState.goalOf(sessionID)
+    const recorded = SecuritySessionState.goalOf(sessionID)
+    const goal = recorded === undefined ? undefined : redact(recorded)
     if (action.kind === "permission")
       return {
         action: { network: false, delegated: action.permission, readSecret, operands: [] },
@@ -153,23 +193,11 @@ export namespace SemanticEvidence {
     }
   }
 
-  /**
-   * A provider that is misconfigured fails the same way every time, and paying the deadline for it on
-   * every decision is a latency bug wearing a safety hat. After three consecutive failures the layer
-   * stops asking for the rest of the process, which lands it in exactly the state it is designed to
-   * be safe in: contributing nothing.
-   */
-  const FAILURE_LIMIT = 3
-  let consecutiveFailures = 0
-
-  function tripped() {
-    return consecutiveFailures >= FAILURE_LIMIT
-  }
+  /** The breaker is shared with the explanation path — see `ClassifierBreaker`. */
+  const tripped = ClassifierBreaker.tripped
 
   /** Test seam: forget a tripped breaker. */
-  export function resetBreaker() {
-    consecutiveFailures = 0
-  }
+  export const resetBreaker = ClassifierBreaker.reset
 
   function evidenceFor(verdict: Verdict, hard: boolean): SecurityEvidence {
     return Decision.evidence({
@@ -242,10 +270,16 @@ export namespace SemanticEvidence {
     const deadline = new Promise<Outcome<T>>((resolve) => {
       timer = setTimeout(() => resolve({ kind: "timeout" }), timeoutMs)
     })
-    const work = call().then(
-      (value): Outcome<T> => ({ kind: "ok", value }),
-      (): Outcome<T> => ({ kind: "error" }),
-    )
+    // `call()` is inside the try: a provider that throws *synchronously* is a provider failure like
+    // any other, and must land in `error` rather than reject this function. It is the same defect
+    // that presentation had — a bad provider escaping as an Effect defect — and the same fix.
+    const work = (async () => {
+      try {
+        return { kind: "ok" as const, value: await call() }
+      } catch {
+        return { kind: "error" as const }
+      }
+    })()
     try {
       return await Promise.race([work, deadline])
     } finally {
@@ -284,9 +318,15 @@ export namespace SemanticEvidence {
     stats.latencies.push(performance.now() - started)
     if (outcome.kind === "timeout") stats.timeouts += 1
     if (outcome.kind === "error") stats.errors += 1
-    if (outcome.kind === "ok") consecutiveFailures = 0
-    else consecutiveFailures += 1
+    ClassifierBreaker.record(outcome.kind === "ok")
     if (outcome.kind !== "ok") return [] as SecurityEvidence[]
+    // A verdict about the user's intent requires knowing it. With no request recorded there is
+    // nothing to compare against, and a model asked anyway will answer from the absence — which is
+    // how "we do not know what you wanted" turns into friction on ordinary work. Measured: with the
+    // request missing, one run flagged 37 of 39 decisions and cost 10 of 51 completed tasks. This is
+    // a structural guard rather than a line in the prompt, because a line in the prompt is a request.
+    if (outcome.value.category === "USER_GOAL_MISMATCH" && summary.goal === undefined)
+      return [] as SecurityEvidence[]
     const evidence = policy(outcome.value)
     if (evidence.length > 0) {
       stats.flagged += 1
