@@ -21,10 +21,11 @@ if (shards > 1) {
   delete env["KILO_HTTPAPI_EXERCISE_DB"]
   delete env["KILO_HTTPAPI_EXERCISE_GLOBAL"]
   const children = Array.from({ length: shards }, (_, index) =>
-    Bun.spawn(
-      [process.execPath, "run", import.meta.path, ...passthrough, "--shard", `${index}/${shards}`],
-      { stdout: "pipe", stderr: "pipe", env },
-    ),
+    Bun.spawn([process.execPath, "run", import.meta.path, ...passthrough, "--shard", `${index}/${shards}`], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env,
+    }),
   )
   const relay = async (stream: ReadableStream<Uint8Array>, tag: string, sink: NodeJS.WriteStream) => {
     const decoder = new TextDecoder()

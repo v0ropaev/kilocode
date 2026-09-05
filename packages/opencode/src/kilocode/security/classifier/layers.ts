@@ -61,6 +61,7 @@ export namespace SemanticEvidence {
   }
 
   export function reset() {
+    consecutiveFailures = 0
     stats.calls = 0
     stats.flagged = 0
     stats.errors = 0
@@ -152,6 +153,24 @@ export namespace SemanticEvidence {
     }
   }
 
+  /**
+   * A provider that is misconfigured fails the same way every time, and paying the deadline for it on
+   * every decision is a latency bug wearing a safety hat. After three consecutive failures the layer
+   * stops asking for the rest of the process, which lands it in exactly the state it is designed to
+   * be safe in: contributing nothing.
+   */
+  const FAILURE_LIMIT = 3
+  let consecutiveFailures = 0
+
+  function tripped() {
+    return consecutiveFailures >= FAILURE_LIMIT
+  }
+
+  /** Test seam: forget a tripped breaker. */
+  export function resetBreaker() {
+    consecutiveFailures = 0
+  }
+
   function evidenceFor(verdict: Verdict, hard: boolean): SecurityEvidence {
     return Decision.evidence({
       rule: hard ? "advisory.semantic.escalate" : "advisory.semantic.flag",
@@ -218,7 +237,7 @@ export namespace SemanticEvidence {
     summary: SemanticInput | undefined
     timeoutMs: number
   }) {
-    if (!input.provider || !input.summary) return [] as SecurityEvidence[]
+    if (!input.provider || !input.summary || tripped()) return [] as SecurityEvidence[]
     const { provider, summary, timeoutMs } = input
     const started = performance.now()
     const outcome = yield* Effect.promise(async () => {
@@ -239,6 +258,8 @@ export namespace SemanticEvidence {
     stats.latencies.push(performance.now() - started)
     if (outcome.kind === "timeout") stats.timeouts += 1
     if (outcome.kind === "error") stats.errors += 1
+    if (outcome.kind === "ok") consecutiveFailures = 0
+    else consecutiveFailures += 1
     if (outcome.kind !== "ok") return [] as SecurityEvidence[]
     const evidence = policy(outcome.verdict)
     if (evidence.length > 0) {

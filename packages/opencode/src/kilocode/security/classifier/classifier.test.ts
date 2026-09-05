@@ -1,7 +1,7 @@
 // The semantic layer's guarantee is that it cannot relax a decision, and that nothing written into
 // the untrusted excerpt can change what it is allowed to do. Both are asserted through the real
 // reducer and the real parser rather than through the layer's own branches.
-import { describe, expect, test } from "bun:test"
+import { beforeEach, describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import { SemanticEvidence } from "./layers"
 import { HeuristicProvider, MockProvider, type ClassifierProvider } from "./provider"
@@ -95,6 +95,10 @@ const allow = Decision.evidence({
   message: "allow",
 })
 
+// The failure counter that trips the breaker is module state. Reset it before every test so no test
+// can be made vacuous by an earlier one having already tripped it.
+beforeEach(() => SemanticEvidence.resetBreaker())
+
 const HIGH = { risk: "HIGH_RISK", category: "PROMPT_INJECTION", confidence: "HIGH" } as const
 const BENIGN = { risk: "ORDINARY", category: "BENIGN_CONTEXT", confidence: "HIGH" } as const
 
@@ -175,6 +179,21 @@ describe("failure is indistinguishable from the layer being off", () => {
     const started = performance.now()
     expect(await run(hanging, 50)).toEqual([])
     expect(performance.now() - started).toBeLessThan(2000)
+  })
+
+  test("a provider that keeps failing is stopped asking, and stays silent", async () => {
+    let calls = 0
+    const alwaysFails: ClassifierProvider = {
+      name: "always-fails",
+      async classify() {
+        calls += 1
+        throw new Error("boom")
+      },
+    }
+    for (let attempt = 0; attempt < 6; attempt++) expect(await run(alwaysFails)).toEqual([])
+    // Three failures trip the breaker; the remaining three never reach the provider. A misconfigured
+    // provider must not cost the deadline on every decision for the life of the process.
+    expect(calls).toBe(3)
   })
 
   test("no provider configured yields no evidence", async () => {

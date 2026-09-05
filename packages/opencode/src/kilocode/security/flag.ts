@@ -30,13 +30,12 @@ export namespace SecurityFlag {
     /** Permissioned host process for approved project extensions. */
     runtime: boolean
     /**
-     * Advisory model review of outbound actions the deterministic layers left unsettled.
+     * Semantic review of actions the deterministic layers left unsettled.
      *
-     * The one layer that is **off** by default with the mode on. Every other layer is deterministic,
-     * costs microseconds and is part of what Security Auto Mode means; this one adds a model
-     * round-trip to a live decision, so it is a deliberate opt-in rather than something a user
-     * discovers by watching their agent stall. With it off, the mode behaves exactly as it does
-     * without this code.
+     * On with the mode, like every other layer — but what actually switches it on is whether a model
+     * provider resolves. With none configured the layer returns nothing on every call, which is the
+     * same behaviour as running without this code at all. So "is the AI on" is answered by the
+     * model the user already set up, not by a second flag they have to find.
      */
     classifier: boolean
   }
@@ -62,13 +61,6 @@ export namespace SecurityFlag {
     return configured !== false
   }
 
-  /** Opt-in layer: the same resolution order, but silence means off rather than on. */
-  function optIn(env: string | undefined, configured: boolean | undefined) {
-    if (truthy(env)) return true
-    if (falsy(env)) return false
-    return configured === true
-  }
-
   /** Which layers are active. Meaningful only when {@link enabled} is true. */
   export const layers = Effect.fn("SecurityFlag.layers")(function* (config: Pick<Config.Interface, "getGlobal">) {
     const global = yield* config.getGlobal().pipe(Effect.catch(() => Effect.succeed(undefined)))
@@ -82,7 +74,7 @@ export namespace SecurityFlag {
         process.env["KILO_SECURITY_AUTO_EXTENSION_RUNTIME"],
         global?.experimental?.security_auto_extension_runtime,
       ),
-      classifier: optIn(process.env["KILO_SECURITY_AUTO_CLASSIFIER"], global?.experimental?.security_auto_classifier),
+      classifier: layer(process.env["KILO_SECURITY_AUTO_CLASSIFIER"], global?.experimental?.security_auto_classifier),
     }
     return result
   })

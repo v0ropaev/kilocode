@@ -265,7 +265,9 @@ export class ModelProvider implements ClassifierProvider {
 
 /** Build a provider from the environment. Returns `undefined` — never throws — when unconfigured. */
 export function providerFromEnv(): ClassifierProvider | undefined {
-  const kind = (process.env["KILO_SECURITY_AUTO_CLASSIFIER_PROVIDER"] ?? "heuristic").toLowerCase()
+  // The model the user already configured is the default: no second key, no vendor named here, and
+  // nothing to switch on. `heuristic` is for offline runs that must not touch a network.
+  const kind = (process.env["KILO_SECURITY_AUTO_CLASSIFIER_PROVIDER"] ?? "kilo").toLowerCase()
   if (kind === "heuristic") return new HeuristicProvider()
   // The model the user already configured. No second key, no vendor named here.
   if (kind === "kilo") return new ModelProvider(kiloBackend())
