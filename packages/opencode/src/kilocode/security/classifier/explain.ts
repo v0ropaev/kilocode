@@ -149,16 +149,15 @@ export namespace RiskExplanation {
     const fallback = template(input.facts)
     const provider = input.provider
     if (!provider?.rewrite) return fallback
-    const outcome = yield* Effect.promise(async () => {
+    // The deadline bounds how long the prompt waits, not just what the provider is asked to do: a
+    // provider can be busy on work no abort signal interrupts, and a person waiting to answer a
+    // security question should never be held up by a sentence that is already written.
+    const outcome = yield* Effect.promise(() => {
       const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), input.timeoutMs)
-      try {
-        return await provider.rewrite?.(SYSTEM_PROMPT, fallback, controller.signal)
-      } catch {
-        return undefined
-      } finally {
-        clearTimeout(timer)
-      }
+      setTimeout(() => controller.abort(), input.timeoutMs)
+      const work = provider.rewrite?.(SYSTEM_PROMPT, fallback, controller.signal).catch(() => undefined)
+      const deadline = new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), input.timeoutMs))
+      return Promise.race([work ?? deadline, deadline])
     })
     return outcome && acceptable(outcome) ? outcome.trim() : fallback
   })
