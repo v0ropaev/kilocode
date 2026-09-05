@@ -61,9 +61,15 @@ const requestedSet = flag("set", "both")!
 // `both` is the two scored corpora. The adversarial set answers a different question and is asked
 // for by name, so a routine run never silently averages it into a recall figure.
 const sets = Object.entries(SETS).filter(([name]) =>
-  requestedSet === "both" ? name !== "adversarial" : name === requestedSet,
+  // `lockbox` is excluded from `both` as well: it is empty until an outside author writes it, and a
+  // set with no cases must be asked for by name rather than appear in a routine run as a blank row.
+  requestedSet === "both" ? name !== "adversarial" && name !== "lockbox" : name === requestedSet,
 )
-if (sets.length === 0) throw new Error("--set expects development, held-out, adversarial or both")
+if (sets.length === 0)
+  throw new Error(`--set expects ${Object.keys(SETS).join(", ")} or both`)
+for (const [name, cases] of sets)
+  if (cases.length === 0)
+    throw new Error(`the ${name} set has no cases yet — see eval/lockbox.ts for what it is waiting for`)
 
 function build(): ClassifierProvider {
   if (kind === "heuristic") return new HeuristicProvider()

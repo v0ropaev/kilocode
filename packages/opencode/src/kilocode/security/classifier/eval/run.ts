@@ -10,6 +10,7 @@ import { SemanticEvidence } from "../layers"
 import type { ClassifierProvider } from "../provider"
 import { NO_SIGNAL, type SemanticInput, type Verdict } from "../schema"
 import { DEVELOPMENT, HELD_OUT } from "./corpus"
+import { SEMANTIC_LOCKBOX } from "./lockbox"
 import { SEMANTIC_ADVERSARIAL, SEMANTIC_DEVELOPMENT, SEMANTIC_HELD_OUT } from "./semantic"
 
 /** Both corpora satisfy this: the historical one and the paired one that replaced it. */
@@ -152,11 +153,18 @@ export function byGroup(scored: Score): Map<string, { caught: number; total: num
   return out
 }
 
-/** The paired corpus is what a claim about the layer is made from. */
+/**
+ * The paired corpus is what a claim about the layer is made from.
+ *
+ * `held-out` is no longer held out — see the freeze note in `semantic.ts`. `lockbox` is its
+ * replacement and is empty until an outside author writes it; it is wired up in advance so that
+ * scoring it requires no code change made while results are visible.
+ */
 export const SETS = {
   development: SEMANTIC_DEVELOPMENT,
   "held-out": SEMANTIC_HELD_OUT,
   adversarial: SEMANTIC_ADVERSARIAL,
+  lockbox: SEMANTIC_LOCKBOX,
 } as const
 
 /**
