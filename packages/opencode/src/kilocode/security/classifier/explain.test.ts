@@ -117,6 +117,22 @@ describe("a model may edit the sentence, and may not do anything else", () => {
     expect(await run(withRewrite(async () => better))).toBe(better)
   })
 
+  test("a provider that throws synchronously falls back, and does not escape as a defect", async () => {
+    // Not hypothetical. A synchronous throw used to escape the Effect thunk, fail the whole
+    // `SecurityGate.evaluate` scope, and be converted into a hard ask — which for a decision that had
+    // already reached DENY is a downgrade. Presentation may not move a decision.
+    const throwsSynchronously: ClassifierProvider = {
+      name: "sync-throw",
+      async classify() {
+        return { risk: "ORDINARY", category: "NONE", confidence: "LOW" }
+      },
+      rewrite() {
+        throw new Error("blew up before returning a promise")
+      },
+    }
+    expect(await run(throwsSynchronously)).toBe(RiskExplanation.template(base))
+  })
+
   test("an error falls back to the template", async () => {
     expect(
       await run(

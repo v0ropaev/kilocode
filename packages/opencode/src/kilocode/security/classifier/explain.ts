@@ -153,11 +153,20 @@ export namespace RiskExplanation {
     // provider can be busy on work no abort signal interrupts, and a person waiting to answer a
     // security question should never be held up by a sentence that is already written.
     const outcome = yield* Effect.promise(() => {
-      const controller = new AbortController()
-      setTimeout(() => controller.abort(), input.timeoutMs)
-      const work = provider.rewrite?.(SYSTEM_PROMPT, fallback, controller.signal).catch(() => undefined)
       const deadline = new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), input.timeoutMs))
-      return Promise.race([work ?? deadline, deadline])
+      try {
+        const controller = new AbortController()
+        setTimeout(() => controller.abort(), input.timeoutMs)
+        // `try` covers the CALL, not just the promise: a provider that throws synchronously would
+        // otherwise escape this thunk as an Effect defect, fail the whole `SecurityGate.evaluate`
+        // scope, and be converted into a hard ask — turning a DENY that had already been reached
+        // into a question. A sentence for a person must never be able to move a decision.
+        const work = provider.rewrite?.(SYSTEM_PROMPT, fallback, controller.signal)
+        if (!work) return deadline
+        return Promise.race([work.catch(() => undefined), deadline])
+      } catch {
+        return Promise.resolve(undefined)
+      }
     })
     return outcome && acceptable(outcome) ? outcome.trim() : fallback
   })
