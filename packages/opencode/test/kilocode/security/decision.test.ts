@@ -95,6 +95,70 @@ describe("security decision reducer", () => {
     expect(decision.reasonCode).toBe("UNCLASSIFIED_ACTION")
   })
 
+  // Strictness is settled by `stricter()`. What is left is which of the equally strict evidences gets
+  // to write the sentence — and "hard" answers a question about authority, not about information.
+  describe("the explanation comes from the evidence that knows the most", () => {
+    const advisory: SecurityEvidence = {
+      rule: "advisory.semantic.escalate",
+      source: "hard",
+      action: "ask",
+      reasonCode: "NETWORK_EGRESS",
+      message: "A semantic review flagged this outbound action for a person to confirm.",
+      attributes: { advisory: true, category: "PROMPT_INJECTION", confidence: "HIGH" },
+    }
+    const egress: SecurityEvidence = {
+      rule: "hard.egress.tainted-file",
+      source: "default",
+      action: "ask",
+      reasonCode: "SECRET_EXFILTRATION",
+      message: "The outbound action would carry credential material read earlier.",
+    }
+    const unclassified: SecurityEvidence = {
+      rule: "engine.default",
+      source: "default",
+      action: "ask",
+      reasonCode: "UNCLASSIFIED_ACTION",
+      message: "The action could not be classified.",
+    }
+
+    test("a named rule outranks an advisory that only says it is uneasy", () => {
+      const decision = Decision.reduce([egress, advisory], fallback)
+      expect(decision.reasonCode).toBe("SECRET_EXFILTRATION")
+      // The advisory still hardened the ask. It lost the sentence, not the strictness.
+      expect(decision.hard).toBe(true)
+      expect(decision.alternatives.length).toBeGreaterThan(0)
+    })
+
+    test("order does not decide it", () => {
+      expect(Decision.reduce([advisory, egress], fallback).reasonCode).toBe("SECRET_EXFILTRATION")
+    })
+
+    test("an advisory still beats having nothing to say", () => {
+      expect(Decision.reduce([unclassified, advisory], fallback).reasonCode).toBe("NETWORK_EGRESS")
+    })
+
+    test("a failure never displaces the reason a rule already found", () => {
+      const denial = item("deny", "hard")
+      const decision = Decision.failure(new Error("boom"), Decision.reduce([denial], fallback))
+      expect(decision.reasonCode).toBe("DESTRUCTIVE_FILESYSTEM")
+      expect(decision.guidance.length).toBeGreaterThan(0)
+      expect(decision.alternatives.length).toBeGreaterThan(0)
+    })
+
+    test("safe alternatives survive a lead that has none of its own", () => {
+      const wordless: SecurityEvidence = {
+        rule: "default.network",
+        source: "hard",
+        action: "ask",
+        reasonCode: "NETWORK_EGRESS",
+        message: "Outbound network access.",
+      }
+      const decision = Decision.reduce([wordless, egress], fallback)
+      // NETWORK_EGRESS carries no alternatives; SECRET_EXFILTRATION does, and they are still offered.
+      expect(decision.alternatives.length).toBeGreaterThan(0)
+    })
+  })
+
   test("sandbox escalation is always a hard ask", () => {
     const decision = SecurityEngine.evaluate(
       { kind: "permission", permission: "sandbox_escalation", patterns: ["git commit"] },

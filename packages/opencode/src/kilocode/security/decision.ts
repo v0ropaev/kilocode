@@ -100,12 +100,45 @@ const alternatives: Partial<Record<SecurityReasonCode, string[]>> = {
   ],
 }
 
-/** Reduce collected evidence into a decision. The strictest action wins; ties prefer hard evidence. */
+/**
+ * How much an evidence tells the person who has to act on it.
+ *
+ * Strictness is decided by {@link stricter} and never by this function: two evidences only compete
+ * here once they already agree on the action. All this chooses is which of them gets to write the
+ * sentence, the guidance and the safe alternatives.
+ *
+ * It exists because "hard" is a statement about authority, not about information. Preferring hard
+ * evidence unconditionally meant that an immutable rule with nothing specific to say — the engine
+ * failed, the action is unclassified, a semantic review is uneasy — displaced a rule that knew
+ * exactly what it had found, and the user was shown the vaguer of the two sentences.
+ */
+function informativeness(item: SecurityEvidence): number {
+  if (guidance[item.reasonCode] === "") return 0
+  if (item.attributes?.["advisory"] === true) return 1
+  if (item.reasonCode === "UNCLASSIFIED_ACTION" || item.reasonCode === "SECURITY_ENGINE_ERROR") return 1
+  return 2
+}
+
+/**
+ * Reduce collected evidence into a decision.
+ *
+ * The strictest action wins — that is the whole safety property, and it holds for any input in any
+ * order. Among the evidences that produced it, the most informative one supplies the user-facing
+ * text; hard evidence wins that tie, and after that the order the rules ran in.
+ */
 export function reduce(evidence: SecurityEvidence[], fallback: SecurityEvidence): SecurityDecision {
   const list = evidence.length > 0 ? evidence : [fallback]
   const action = list.reduce((acc, item) => stricter(acc, item.action), "allow" as SecurityAction)
   const winners = list.filter((item) => item.action === action)
-  const lead = winners.find((item) => item.source === "hard") ?? winners[0] ?? fallback
+  const ranked = [...winners].sort((a, b) => {
+    const byInformation = informativeness(b) - informativeness(a)
+    if (byInformation !== 0) return byInformation
+    return Number(b.source === "hard") - Number(a.source === "hard")
+  })
+  const lead = ranked[0] ?? fallback
+  // A lead that carries no alternatives must not erase ones another winner offered: the point of a
+  // safe alternative is that the agent can act on it, and it is still true whoever said it.
+  const options = alternatives[lead.reasonCode] ?? ranked.map((item) => alternatives[item.reasonCode]).find(Boolean)
   return {
     action,
     hard: action === "deny" || (action === "ask" && winners.some((item) => item.source === "hard")),
@@ -114,21 +147,45 @@ export function reduce(evidence: SecurityEvidence[], fallback: SecurityEvidence)
     guidance: guidance[lead.reasonCode],
     canRetry: action !== "allow",
     evidence: list,
-    alternatives: (alternatives[lead.reasonCode] ?? []).map((description): SafeAlternative => ({ description })),
+    alternatives: (options ?? []).map((description): SafeAlternative => ({ description })),
   }
 }
 
-/** Fail safe: a security layer failure is a hard ASK, never a silent ALLOW. */
-export function failure(err: unknown): SecurityDecision {
-  const name = err instanceof Error ? err.name : "Error"
-  return reduce([], {
-    rule: "engine.failure",
-    source: "hard",
-    action: "ask",
-    reasonCode: "SECURITY_ENGINE_ERROR",
-    message: "The security check could not be completed.",
-    attributes: { error: name },
-  })
+const FAILED: SecurityEvidence = {
+  rule: "engine.failure",
+  source: "hard",
+  action: "ask",
+  reasonCode: "SECURITY_ENGINE_ERROR",
+  message: "The security check could not be completed.",
+}
+
+/**
+ * The failure itself, as one evidence.
+ *
+ * A caller that can keep going — one layer of several — folds this in and runs the rest. A caller
+ * that cannot hands it to {@link failure}. Either way the failure enters the decision through the
+ * same monotone fold as everything else, which is why it can add friction and never remove any.
+ */
+export function failed(err: unknown): SecurityEvidence {
+  return { ...FAILED, attributes: { error: err instanceof Error ? err.name : "Error" } }
+}
+
+/**
+ * Fail safe: a security layer failure is a hard ASK, never a silent ALLOW.
+ *
+ * When part of the evaluation already reached a conclusion, that conclusion is passed in and the
+ * failure is *folded into it* rather than substituted for it. This is the difference between "the
+ * check broke, so ask" and "the check broke, so forget that we had already decided to deny" — and
+ * the second one is a real downgrade path: any defect thrown after a DENY was reached, in a later
+ * layer or in presentation, used to turn that DENY into a question a permissive rule could answer.
+ *
+ * Folding gives the property in one line of arithmetic instead of a list of cases: the failure is an
+ * ASK, `stricter()` keeps the maximum, so DENY stays DENY, a hard ASK stays hard, a soft ASK becomes
+ * hard, and ALLOW becomes the fail-safe ASK.
+ */
+export function failure(err: unknown, base?: SecurityDecision): SecurityDecision {
+  const evidence = failed(err)
+  return reduce([...(base?.evidence ?? []), evidence], evidence)
 }
 
 export function evidence(input: {
