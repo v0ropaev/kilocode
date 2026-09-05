@@ -27,6 +27,25 @@ sleep 1
 rm -rf "$WORK"
 mkdir -p "$WORK"/{config/kilo,data,state,cache,home,app/src,app/settings}
 
+# The agent model is the scripted stub, so the demo is reproducible: the same two tool calls happen in
+# both halves of every pair. The *security classifier* is a separate model and can be a real one —
+# `KILO_UI_CLASSIFIER_MODEL=openrouter/anthropic/claude-haiku-4.5` with the provider's API key in the
+# environment. The key is written into this run's own auth store and never appears in the recording:
+# `env -i` below hands the child a fresh environment that does not contain it.
+CLASSIFIER_MODEL="${KILO_UI_CLASSIFIER_MODEL:-}"
+if [ -n "$CLASSIFIER_MODEL" ]; then
+  PROVIDER_ID="${CLASSIFIER_MODEL%%/*}"
+  KEY_VAR="$(echo "$PROVIDER_ID" | tr '[:lower:]-' '[:upper:]_')_API_KEY"
+  eval "PROVIDER_KEY=\${$KEY_VAR:-}"
+  if [ -z "$PROVIDER_KEY" ]; then
+    echo "KILO_UI_CLASSIFIER_MODEL=$CLASSIFIER_MODEL needs $KEY_VAR in the environment" >&2
+    exit 2
+  fi
+  mkdir -p "$WORK/data/kilo"
+  umask 077
+  printf '{"%s":{"type":"api","key":"%s"}}' "$PROVIDER_ID" "$PROVIDER_KEY" > "$WORK/data/kilo/auth.json"
+fi
+
 cat > "$WORK/config/kilo/kilo.json" <<'JSON'
 {
   "$schema": "https://kilocode.ai/config.json",
@@ -84,6 +103,7 @@ env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin HOME="$WORK/home" TE
   XDG_CACHE_HOME="$WORK/cache" KILO_CONFIG_DIR="$WORK/config/kilo" \
   KILO_SECURITY_AUTO="$FLAG" KILO_CLIENT=cli \
   KILO_SECURITY_AUTO_CLASSIFIER_PROVIDER="${KILO_UI_CLASSIFIER:-kilo}" \
+  KILO_SECURITY_AUTO_CLASSIFIER_MODEL="$CLASSIFIER_MODEL" \
   KILO_SECURITY_AUTO_CLASSIFIER="${KILO_UI_AI:-1}" \
   bun run --conditions=node "$REPO/packages/opencode/src/index.ts" run $AUTO "$PROMPT" \
   > "$HERE/$OUT.ansi" 2>&1 &
