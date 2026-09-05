@@ -10,6 +10,7 @@ import { SemanticEvidence } from "../layers"
 import type { ClassifierProvider } from "../provider"
 import { NO_SIGNAL, type SemanticInput, type Verdict } from "../schema"
 import { DEVELOPMENT, HELD_OUT } from "./corpus"
+import { SEMANTIC_LOCKBOX } from "./lockbox"
 import { SEMANTIC_ADVERSARIAL, SEMANTIC_DEVELOPMENT, SEMANTIC_HELD_OUT } from "./semantic"
 
 /** Both corpora satisfy this: the historical one and the paired one that replaced it. */
@@ -60,35 +61,42 @@ export interface Score {
  */
 export interface Pass {
   verdicts: Verdict[]
+  /** What was actually sent, kept so scoring can apply the same bound the product applies. */
+  prepared: SemanticInput[]
   latencies: number[]
   errors: number
 }
 
 export async function classifyAll(provider: ClassifierProvider, cases: ScorableCase[]): Promise<Pass> {
   const verdicts: Verdict[] = []
+  const prepared: SemanticInput[] = []
   const latencies: number[] = []
   let errors = 0
   for (const item of cases) {
     const controller = new AbortController()
     const started = performance.now()
+    // Through the same preparation the product applies: redaction, because several cases turn on a
+    // file holding credentials and what reaches a model is the key names with the values replaced;
+    // and the content classifier's adjudication, because that is what bounds how far the answer
+    // carries. Scoring the raw case would measure a pipeline that does not ship.
+    const input = SemanticEvidence.redactInput(item.input)
+    prepared.push(input)
     try {
-      // Through the same redaction the product applies. Scoring the raw case would measure a
-      // pipeline that does not ship: several cases turn on a file holding credentials, and what
-      // actually reaches a model is the key names with the values replaced.
-      verdicts.push(await provider.classify(SemanticEvidence.redactInput(item.input), controller.signal))
+      verdicts.push(await provider.classify(input, controller.signal))
     } catch {
       errors += 1
       verdicts.push(NO_SIGNAL)
     }
     latencies.push(performance.now() - started)
   }
-  return { verdicts, latencies, errors }
+  return { verdicts, prepared, latencies, errors }
 }
 
 export function scorePass(cases: ScorableCase[], pass: Pass, mode: SemanticEvidence.Sensitivity): Score {
   const outcomes = cases.map((item, index): Outcome => {
     const verdict = pass.verdicts[index] ?? NO_SIGNAL
-    const evidence = SemanticEvidence.policy(verdict, mode)
+    const sent = pass.prepared[index]
+    const evidence = SemanticEvidence.policy(verdict, mode, sent ? SemanticEvidence.settled(sent, verdict) : false)
     const escalated = evidence.length > 0
     return {
       id: item.id,
@@ -145,11 +153,18 @@ export function byGroup(scored: Score): Map<string, { caught: number; total: num
   return out
 }
 
-/** The paired corpus is what a claim about the layer is made from. */
+/**
+ * The paired corpus is what a claim about the layer is made from.
+ *
+ * `held-out` is no longer held out — see the freeze note in `semantic.ts`. `lockbox` is its
+ * replacement and is empty until an outside author writes it; it is wired up in advance so that
+ * scoring it requires no code change made while results are visible.
+ */
 export const SETS = {
   development: SEMANTIC_DEVELOPMENT,
   "held-out": SEMANTIC_HELD_OUT,
   adversarial: SEMANTIC_ADVERSARIAL,
+  lockbox: SEMANTIC_LOCKBOX,
 } as const
 
 /**

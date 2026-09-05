@@ -205,6 +205,14 @@ export namespace SecurityGate {
     /** Wall-clock cost of normalisation + engine evaluation, in milliseconds. */
     durationMs: number
     fromEnvelope: boolean
+    /**
+     * The semantic layer's verdict, when one contributed to this decision.
+     *
+     * A tally of verdicts says how the layer behaves in aggregate; this says which *decision* each one
+     * changed, which is the only way to ask why a particular safe action was escalated. Reported, not
+     * consulted: nothing downstream of the fold reads it.
+     */
+    advisory?: { category: string; risk: string; confidence: string }
   }
 
   let observer: ((observation: Observation) => void) | undefined
@@ -549,6 +557,7 @@ export namespace SecurityGate {
     )
     const durationMs = performance.now() - started
     const decision = Exit.isSuccess(exit) ? exit.value : Decision.failure(Cause.squash(exit.cause), reached)
+    const advisory = decision.evidence.find((item) => item.attributes?.["advisory"] === true)?.attributes
     report({
       sessionID: input.sessionID,
       permission: input.request.permission,
@@ -558,6 +567,15 @@ export namespace SecurityGate {
       rules: [...new Set(decision.evidence.map((item) => item.rule))],
       durationMs,
       fromEnvelope: input.request.metadata?.[SecurityKeys.ENVELOPE] === true,
+      ...(advisory
+        ? {
+            advisory: {
+              category: String(advisory["category"]),
+              risk: String(advisory["risk"]),
+              confidence: String(advisory["confidence"]),
+            },
+          }
+        : {}),
     })
     const command = text(input.request.metadata?.command)
     log.info("decision", {
