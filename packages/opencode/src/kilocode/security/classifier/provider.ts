@@ -165,17 +165,60 @@ function pluck(body: unknown, keys: Array<string | number>): string {
  * `Cannot access 'node' before initialization` in this project once. The deferral is the same pattern
  * `kilocode/cli/cmd/roll-call.ts` uses, for the same reason.
  */
+let kiloDeps: Promise<KiloDeps> | undefined
+let kiloReady: KiloDeps | undefined
+
+interface KiloDeps {
+  generateText: typeof import("ai").generateText
+  Provider: typeof import("@/provider/provider").Provider
+  ProviderTransform: typeof import("@/provider/transform").ProviderTransform
+  AppRuntime: typeof import("@/effect/app-runtime").AppRuntime
+  Effect: typeof import("effect").Effect
+}
+
+/**
+ * Load the provider graph once, in the background, and never inside a decision.
+ *
+ * Measured: the first call cost 1.08 s — the AI SDK and the provider layer being imported — and that
+ * second landed inside a live security decision, which was enough to push one benchmark scenario past
+ * its own timeout and change its outcome. A layer that cannot relax a decision was still able to
+ * change one, through latency. So the first call now starts the import and returns nothing, and only
+ * calls made after it finishes reach a model. "Nothing" is the layer's safe direction anyway.
+ */
+function kiloModules(): KiloDeps | undefined {
+  kiloDeps ??= Promise.all([
+    import("ai"),
+    import("@/provider/provider"),
+    import("@/provider/transform"),
+    import("@/effect/app-runtime"),
+    import("effect"),
+  ]).then(([ai, provider, transform, runtime, effect]) => {
+    kiloReady = {
+      generateText: ai.generateText,
+      Provider: provider.Provider,
+      ProviderTransform: transform.ProviderTransform,
+      AppRuntime: runtime.AppRuntime,
+      Effect: effect.Effect,
+    }
+    return kiloReady
+  })
+  return kiloReady
+}
+
+/** Test seam: forget the cached module graph. */
+export function resetKiloModules() {
+  kiloDeps = undefined
+  kiloReady = undefined
+}
+
 export function kiloBackend(): ModelBackend {
   return {
     name: "kilo:small-model",
     async complete(system, user, maxTokens, signal) {
-      const [{ generateText }, { Provider }, { ProviderTransform }, { AppRuntime }, { Effect }] = await Promise.all([
-        import("ai"),
-        import("@/provider/provider"),
-        import("@/provider/transform"),
-        import("@/effect/app-runtime"),
-        import("effect"),
-      ])
+      const deps = kiloModules()
+      // Still loading. Say nothing rather than make a decision wait on an import.
+      if (!deps) return ""
+      const { generateText, Provider, ProviderTransform, AppRuntime, Effect } = deps
       const resolved = await AppRuntime.runPromise(
         Provider.Service.use((service) =>
           Effect.gen(function* () {

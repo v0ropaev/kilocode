@@ -32,7 +32,7 @@ import { Decision } from "../decision"
 import { SecuritySessionState } from "../state/store"
 import type { NormalizedAction, NormalizedPath, SecurityDecision, SecurityEvidence } from "../types"
 import type { ClassifierProvider } from "./provider"
-import { NO_SIGNAL, type SemanticInput, type Verdict } from "./schema"
+import type { SemanticInput, Verdict } from "./schema"
 
 export namespace SemanticEvidence {
   /** Counters for the ablation: cost and reliability are reported, never inferred. */
@@ -225,6 +225,39 @@ export namespace SemanticEvidence {
   }
 
   /**
+   * Run a provider call under a real deadline.
+   *
+   * The `AbortSignal` asks the provider to stop; this decides how long the *decision* waits, which is
+   * not the same thing and the difference was measurable. Resolving a model goes through the provider
+   * service, and an unauthenticated resolution spends about a second fetching a model catalogue —
+   * work no abort signal interrupts. Awaiting it meant a layer that cannot relax a decision could
+   * still change one through latency: with no model configured, one benchmark scenario ran past its
+   * own timeout and succeeded.
+   *
+   * So the deadline stops the waiting, not the work. Whatever the provider is still doing settles
+   * into a handler that discards it.
+   */
+  async function bounded<T>(call: () => Promise<T>, timeoutMs: number): Promise<Outcome<T>> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<Outcome<T>>((resolve) => {
+      timer = setTimeout(() => resolve({ kind: "timeout" }), timeoutMs)
+    })
+    const work = call().then(
+      (value): Outcome<T> => ({ kind: "ok", value }),
+      (): Outcome<T> => ({ kind: "error" }),
+    )
+    try {
+      return await Promise.race([work, deadline])
+    } finally {
+      clearTimeout(timer)
+      // The loser of the race must not surface later as an unhandled rejection.
+      void work.catch(() => undefined)
+    }
+  }
+
+  type Outcome<T> = { kind: "ok"; value: T } | { kind: "timeout" } | { kind: "error" }
+
+  /**
    * Ask the layer about one action. Yields evidence to fold, or nothing at all.
    *
    * Every failure path yields nothing: no provider, a timeout, a transport error, an answer outside
@@ -240,19 +273,12 @@ export namespace SemanticEvidence {
     if (!input.provider || !input.summary || tripped()) return [] as SecurityEvidence[]
     const { provider, summary, timeoutMs } = input
     const started = performance.now()
-    const outcome = yield* Effect.promise(async () => {
+    const outcome = yield* Effect.promise(() => {
+      // The signal still travels to the provider so a well-behaved one stops early; the race decides
+      // how long this decision waits either way.
       const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), timeoutMs)
-      try {
-        return { kind: "ok" as const, verdict: await provider.classify(summary, controller.signal) }
-      } catch {
-        return {
-          kind: controller.signal.aborted ? ("timeout" as const) : ("error" as const),
-          verdict: NO_SIGNAL,
-        }
-      } finally {
-        clearTimeout(timer)
-      }
+      setTimeout(() => controller.abort(), timeoutMs)
+      return bounded(() => provider.classify(summary, controller.signal), timeoutMs)
     })
     stats.calls += 1
     stats.latencies.push(performance.now() - started)
@@ -261,10 +287,10 @@ export namespace SemanticEvidence {
     if (outcome.kind === "ok") consecutiveFailures = 0
     else consecutiveFailures += 1
     if (outcome.kind !== "ok") return [] as SecurityEvidence[]
-    const evidence = policy(outcome.verdict)
+    const evidence = policy(outcome.value)
     if (evidence.length > 0) {
       stats.flagged += 1
-      stats.byCategory[outcome.verdict.category] = (stats.byCategory[outcome.verdict.category] ?? 0) + 1
+      stats.byCategory[outcome.value.category] = (stats.byCategory[outcome.value.category] ?? 0) + 1
     }
     return evidence
   })
