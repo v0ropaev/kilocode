@@ -1,4 +1,12 @@
 /**
+ * HISTORICAL. The corpus that claims are made from is `semantic.ts`.
+ *
+ * Kept, rather than deleted, because deleting it would erase the record of what it did and did not
+ * measure — and the second corpus is designed around exactly those failures. Nothing is claimed from
+ * this one; it is a development set whose limits are documented below in its own words.
+ *
+ * ---
+ *
  * Evaluation corpus for the semantic layer.
  *
  * Split in two, and the split is only partly intact. Read this before quoting a number from it.

@@ -41,7 +41,9 @@ export namespace SecurityEngine {
     try {
       return Decision.reduce([...base.evidence, ...extra], FALLBACK)
     } catch (err) {
-      return Decision.failure(err)
+      // The base is handed to `failure` so the fold keeps it: a layer that throws must not be able to
+      // discard a DENY the rules had already reached.
+      return Decision.failure(err, base)
     }
   }
 }

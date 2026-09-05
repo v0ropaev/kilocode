@@ -14,6 +14,32 @@
  */
 import { NO_SIGNAL, SYSTEM_PROMPT, nonce, parse, render, type SemanticInput, type Verdict } from "./schema"
 
+/**
+ * One circuit breaker for everything that calls the provider.
+ *
+ * A misconfigured provider fails the same way every time, and paying the deadline for it on every
+ * decision is a latency bug wearing a safety hat. It lives here rather than in the semantic layer
+ * because the explanation path calls the same provider for the same reasons and would otherwise keep
+ * paying after the classifier had given up — which is how a session with no model configured ends up
+ * waiting on every single denial.
+ *
+ * Tripping it lands the layer in exactly the state it is designed to be safe in: contributing
+ * nothing.
+ */
+export namespace ClassifierBreaker {
+  const LIMIT = 3
+  let failures = 0
+  export function tripped() {
+    return failures >= LIMIT
+  }
+  export function record(ok: boolean) {
+    failures = ok ? 0 : failures + 1
+  }
+  export function reset() {
+    failures = 0
+  }
+}
+
 export interface ClassifierProvider {
   readonly name: string
   classify(input: SemanticInput, signal: AbortSignal): Promise<Verdict>
@@ -211,9 +237,73 @@ export function resetKiloModules() {
   kiloReady = undefined
 }
 
-export function kiloBackend(): ModelBackend {
+/**
+ * What each model call cost, recorded as it happens.
+ *
+ * A security feature that calls a model has a price, and "we did not measure it" is not an acceptable
+ * answer to a question about it. Tokens come from the provider's own report; the rate comes from the
+ * model catalogue Kilo already carries, so the cost is computed the same way the session cost is.
+ */
+export interface ClassifierCall {
+  model: string
+  inputTokens: number
+  outputTokens: number
+  reasoningTokens: number
+  costUsd: number
+  latencyMs: number
+}
+
+export namespace ClassifierUsage {
+  const calls: ClassifierCall[] = []
+  export function record(call: ClassifierCall) {
+    calls.push(call)
+  }
+  export function snapshot(): ClassifierCall[] {
+    return [...calls]
+  }
+  export function reset() {
+    calls.length = 0
+  }
+  export function total() {
+    return calls.reduce(
+      (acc, call) => ({
+        calls: acc.calls + 1,
+        inputTokens: acc.inputTokens + call.inputTokens,
+        outputTokens: acc.outputTokens + call.outputTokens,
+        reasoningTokens: acc.reasoningTokens + call.reasoningTokens,
+        costUsd: acc.costUsd + call.costUsd,
+      }),
+      { calls: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, costUsd: 0 },
+    )
+  }
+}
+
+/**
+ * A model reached through Kilo's own provider service.
+ *
+ * This is the backend a deployment should use: no vendor is named here, no second key is introduced,
+ * and whatever the user already configured — a cloud provider, a gateway, a local OpenAI-compatible
+ * server declared in the Kilo config — is what answers. With no model pinned it asks for the *small*
+ * model, the same one prompt enhancement and title generation use, because this is the same shape of
+ * job. `model` (or `KILO_SECURITY_AUTO_CLASSIFIER_MODEL`) pins a specific `provider/model` when a
+ * deployment wants the security classifier decoupled from the coding model, which is also how the
+ * evaluation pins one model across a whole run.
+ */
+export function kiloBackend(opts: { model?: string } = {}): ModelBackend {
+  const pinned = opts.model ?? process.env["KILO_SECURITY_AUTO_CLASSIFIER_MODEL"]
+  // Start the import here, when the backend is built, rather than on the first call that needs an
+  // answer. Building it is what a session does when the layer is switched on, which is typically many
+  // decisions before the first outbound action — so by the time a verdict is wanted, the graph is
+  // loaded. Measured: without this, the first eligible decision in a process always got no answer,
+  // and in a benchmark that lands on whichever scenario happens to go first.
+  //
+  // Off the current tick, though. A caller may build this at module-evaluation time (the evaluation
+  // script does), and starting the import there re-enters a strongly connected component whose
+  // members read module-level constants — which is exactly the `Cannot access 'Path' before
+  // initialization` this deferral exists to avoid.
+  setTimeout(() => kiloModules(), 0)
   return {
-    name: "kilo:small-model",
+    name: pinned ? `kilo:${pinned}` : "kilo:small-model",
     async complete(system, user, maxTokens, signal) {
       const deps = kiloModules()
       // Still loading. Say nothing rather than make a decision wait on an import.
@@ -222,13 +312,16 @@ export function kiloBackend(): ModelBackend {
       const resolved = await AppRuntime.runPromise(
         Provider.Service.use((service) =>
           Effect.gen(function* () {
-            const ref = yield* service.defaultModel()
-            const model =
-              (yield* service.getSmallModel(ref.providerID)) ?? (yield* service.getModel(ref.providerID, ref.modelID))
+            const ref = pinned ? Provider.parseModel(pinned) : yield* service.defaultModel()
+            const model = pinned
+              ? yield* service.getModel(ref.providerID, ref.modelID)
+              : ((yield* service.getSmallModel(ref.providerID)) ??
+                (yield* service.getModel(ref.providerID, ref.modelID)))
             return { model, language: yield* service.getLanguage(model) }
           }),
         ),
       )
+      const started = performance.now()
       const result = await generateText({
         model: resolved.language,
         // Deterministic where the provider allows it: a security notice should not vary run to run.
@@ -239,6 +332,19 @@ export function kiloBackend(): ModelBackend {
         maxOutputTokens: maxTokens,
         system,
         messages: [{ role: "user" as const, content: user }],
+      })
+      const inputTokens = result.usage?.inputTokens ?? 0
+      const outputTokens = result.usage?.outputTokens ?? 0
+      const reasoningTokens = result.usage?.reasoningTokens ?? 0
+      ClassifierUsage.record({
+        model: `${resolved.model.providerID}/${resolved.model.id}`,
+        inputTokens,
+        outputTokens,
+        reasoningTokens,
+        // The catalogue quotes dollars per million tokens.
+        costUsd:
+          (inputTokens * (resolved.model.cost?.input ?? 0) + outputTokens * (resolved.model.cost?.output ?? 0)) / 1e6,
+        latencyMs: performance.now() - started,
       })
       return result.text.trim()
     },
@@ -342,4 +448,16 @@ export function defaultProvider(): ClassifierProvider | undefined {
 
 export function resetProvider() {
   cached = undefined
+}
+
+/**
+ * Test seam: pin the process-wide provider.
+ *
+ * Only tests and the evaluation scripts use it. It exists because the properties worth asserting
+ * about this layer are about *failing* providers — one that throws where nothing catches, one that
+ * never answers, one that answers with a 401 — and those have to be reachable from the gate, not
+ * only from the layer they live behind.
+ */
+export function setProvider(provider: ClassifierProvider | undefined) {
+  cached = { provider }
 }

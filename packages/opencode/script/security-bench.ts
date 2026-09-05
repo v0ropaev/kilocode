@@ -30,6 +30,26 @@ const scenarioFilter = arg("scenario")
 const configsArg = arg("configs")
 const tag = arg("tag")
 
+/**
+ * Running the ladder against a real model.
+ *
+ *   --classifier-model openrouter/anthropic/claude-haiku-4.5
+ *
+ * The credential needs care. This benchmark executes attacker-written commands for real, so the rule
+ * that no real provider key may be visible to a scenario shell is not negotiable. The key is
+ * therefore lifted out of the environment *before* the scrub below and handed to Kilo through its own
+ * auth store inside the disposable sandbox — the mechanism Kilo already uses for provider
+ * credentials. `process.env` never carries it past this point, so nothing a scenario runs can read
+ * it, and the store is deleted with the sandbox.
+ */
+const classifierModel = arg("classifier-model")
+const providerID = classifierModel?.split("/")[0]
+const providerKey = providerID ? process.env[`${providerID.toUpperCase().replaceAll("-", "_")}_API_KEY`] : undefined
+if (classifierModel && !providerKey)
+  throw new Error(
+    `--classifier-model ${classifierModel} needs ${providerID?.toUpperCase()}_API_KEY in the environment (it is removed from process.env before any scenario runs)`,
+  )
+
 // ---------------------------------------------------------------------------
 // Isolation env — must run before importing anything from src/.
 // ---------------------------------------------------------------------------
@@ -51,10 +71,14 @@ process.env.XDG_STATE_HOME = path.join(base, "state")
 process.env.KILO_TEST_HOME = home
 process.env.HOME = home
 process.env.KILO_DB = ":memory:"
-process.env.KILO_DISABLE_MODELS_FETCH = "1"
 process.env.KILO_DISABLE_DEFAULT_PLUGINS = "true"
 process.env.KILO_TELEMETRY_LEVEL = "off"
-process.env.KILO_MODELS_PATH = path.join(import.meta.dir, "..", "test", "tool", "fixtures", "models-api.json")
+// The fixture catalogue keeps an offline run reproducible. A real-model run needs the real one, and
+// it is the only thing in this script that is allowed to reach the network besides the model call.
+if (!classifierModel) {
+  process.env.KILO_DISABLE_MODELS_FETCH = "1"
+  process.env.KILO_MODELS_PATH = path.join(import.meta.dir, "..", "test", "tool", "fixtures", "models-api.json")
+}
 process.env.KILO_EXPERIMENTAL_EVENT_SYSTEM = "true"
 process.env.KILO_EXPERIMENTAL_WORKSPACES = "true"
 process.env.KILO_EXPERIMENTAL_DISABLE_FILEWATCHER = "true"
@@ -76,9 +100,12 @@ const { BenchHarness } = await import("@/kilocode/security/bench/harness")
 const { BenchScenarios } = await import("@/kilocode/security/bench/scenarios")
 const { BenchMetrics } = await import("@/kilocode/security/bench/metrics")
 // The ablation must be reproducible with no network and no key, so the offline stand-in is the
-// default here even though the product's default is the model the user configured. Override it to
-// run the same ladder against a real model.
-process.env["KILO_SECURITY_AUTO_CLASSIFIER_PROVIDER"] ??= "heuristic"
+// default here even though the product's default is the model the user configured. `--classifier-model`
+// runs the same ladder against a real one, through Kilo's provider service.
+if (classifierModel) {
+  process.env["KILO_SECURITY_AUTO_CLASSIFIER_PROVIDER"] = "kilo"
+  process.env["KILO_SECURITY_AUTO_CLASSIFIER_MODEL"] = classifierModel
+} else process.env["KILO_SECURITY_AUTO_CLASSIFIER_PROVIDER"] ??= "heuristic"
 const { BenchReport } = await import("@/kilocode/security/bench/report")
 const { BenchCollector } = await import("@/kilocode/security/bench/collector")
 const { BenchIsolation } = await import("@/kilocode/security/bench/isolation")
@@ -86,6 +113,20 @@ const { BenchIsolation } = await import("@/kilocode/security/bench/isolation")
 // Fail closed: if the isolation env did not take, do not run destructive scenarios.
 if (Global.Path.home !== home) {
   throw new Error(`fake HOME did not take: Global.Path.home=${Global.Path.home}, expected ${home}`)
+}
+
+// The provider credential, written into the sandbox's own auth store rather than left in the
+// environment. `Global.Path.data` resolves under the disposable base directory (a sibling of the fake
+// HOME, so no home-targeting scenario reaches it) and the whole tree is removed at the end.
+if (classifierModel && providerKey) {
+  if (!Global.Path.data.startsWith(base))
+    throw new Error(`auth store is outside the sandbox: ${Global.Path.data} is not under ${base}`)
+  await fs.mkdir(Global.Path.data, { recursive: true })
+  await fs.writeFile(
+    path.join(Global.Path.data, "auth.json"),
+    JSON.stringify({ [providerID!]: { type: "api", key: providerKey } }),
+    { mode: 0o600 },
+  )
 }
 
 const sandbox = await BenchIsolation.create({
@@ -122,7 +163,12 @@ console.error(
   `running ${scenarios.length} scenarios × ${runsPerCase} runs × ${configs.length} configs = ${scenarios.length * runsPerCase * configs.length} runs`,
 )
 
-const results = await Effect.runPromise(BenchHarness.runAll({ scenarios, runsPerCase, sandbox, collector, configs }))
+const run = () => Effect.runPromise(BenchHarness.runAll({ scenarios, runsPerCase, sandbox, collector, configs }))
+// A model reached through Kilo's provider service resolves an instance context; the offline stand-in
+// needs none. Establishing it around the whole run keeps that knowledge out of the security code.
+const results = classifierModel
+  ? await (await import("@/kilocode/instance")).provide({ directory: sandboxRoot, fn: run })
+  : await run()
 
 const report = BenchMetrics.aggregate({
   results,
@@ -131,24 +177,43 @@ const report = BenchMetrics.aggregate({
   generatedAt: new Date().toISOString(),
   configs,
 })
+/** What the model calls actually cost, from the provider's own token counts and the catalogue rate. */
+function cost(): string[] {
+  const usage = ClassifierUsage.total()
+  if (usage.calls === 0) return []
+  const perCall = usage.costUsd / usage.calls
+  return [
+    "| Model calls | Input tokens | Output tokens | Total cost | Per call |",
+    "| --: | --: | --: | --: | --: |",
+    `| ${usage.calls} | ${usage.inputTokens} | ${usage.outputTokens} | $${usage.costUsd.toFixed(4)} | $${perCall.toFixed(6)} |`,
+  ]
+}
+
+const { ClassifierUsage } = await import("@/kilocode/security/classifier/provider")
 const advisory = [...BenchHarness.classifierStats().entries()].filter(([, stats]) => stats.calls > 0)
 const advisorySection = advisory.length
   ? [
       "",
       "## LLM advisory cost (opt-in layer)",
       "",
-      "| Configuration | Considered | Model calls | Calls per decision | Flagged | Errors | Timeouts | Advisory p50 | Advisory p95 |",
-      "| --- | --: | --: | --: | --: | --: | --: | --: | --: |",
+      "| Configuration | Considered | Model calls | Calls per decision | Flagged | By category | Errors | Timeouts | Advisory p50 | Advisory p95 |",
+      "| --- | --: | --: | --: | --: | --- | --: | --: | --: | --: |",
       ...advisory.map(([config, stats]) => {
         const sorted = [...stats.latencies].sort((a, b) => a - b)
         const q = (p: number) =>
           sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))] : 0
         const decisions = results.filter((r) => r.config === config).reduce((n, r) => n + r.decisions.length, 0)
         const rate = decisions > 0 ? (stats.calls / decisions).toFixed(2) : "n/a"
-        return `| ${config} | ${stats.considered} | ${stats.calls} | ${rate} | ${stats.flagged} | ${stats.errors} | ${stats.timeouts} | ${q(50).toFixed(2)} ms | ${q(95).toFixed(2)} ms |`
+        const categories =
+          Object.entries(stats.byCategory)
+            .sort((a, b) => b[1] - a[1])
+            .map(([name, count]) => `${name} ${count}`)
+            .join(", ") || "—"
+        return `| ${config} | ${stats.considered} | ${stats.calls} | ${rate} | ${stats.flagged} | ${categories} | ${stats.errors} | ${stats.timeouts} | ${q(50).toFixed(2)} ms | ${q(95).toFixed(2)} ms |`
       }),
       "",
-      `_Provider: ${process.env["KILO_SECURITY_AUTO_CLASSIFIER_PROVIDER"] ?? "heuristic"}._`,
+      `_Provider: ${process.env["KILO_SECURITY_AUTO_CLASSIFIER_PROVIDER"] ?? "heuristic"}${classifierModel ? ` (${classifierModel})` : ""}._`,
+      ...(classifierModel ? [""].concat(cost()) : []),
     ].join("\n")
   : ""
 

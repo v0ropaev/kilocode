@@ -81,11 +81,23 @@ export namespace SecurityFlag {
 
   /**
    * How long a decision may wait on the advisory model before the deterministic answer stands.
-   * `KILO_SECURITY_AUTO_CLASSIFIER_TIMEOUT_MS`, default 300 ms — the budget the design note names.
+   * `KILO_SECURITY_AUTO_CLASSIFIER_TIMEOUT_MS`, default 2500 ms.
+   *
+   * The design note named 300 ms, written before anything had measured a real model. Measured, with
+   * `claude-haiku-4.5` over a hosted gateway: about 960 ms median and 1215 ms at p95 from a quiet
+   * process, and 1250 / 2475 ms while the benchmark is running scenarios around it. At 300 ms the
+   * layer times out on essentially every call — which is safe, because a timeout contributes nothing,
+   * and useless, because contributing nothing is also what being switched off does. A budget that
+   * makes a feature silent is not a latency guarantee; it is a way of not noticing the feature is off.
+   *
+   * So the default covers the measured tail, and the cost is stated rather than hidden: up to 2.5 s
+   * added to a decision, on the decisions the router actually sends — 0.16 of them in the benchmark.
+   * A faster model wants a smaller number; a deployment that prefers the old budget can set one and
+   * will get a layer that mostly says nothing.
    */
   export function classifierTimeoutMs(): number {
     const raw = Number(process.env["KILO_SECURITY_AUTO_CLASSIFIER_TIMEOUT_MS"])
-    return Number.isFinite(raw) && raw > 0 ? raw : 300
+    return Number.isFinite(raw) && raw > 0 ? raw : 2500
   }
 
   /**

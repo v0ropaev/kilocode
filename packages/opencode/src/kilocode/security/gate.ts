@@ -353,6 +353,32 @@ export namespace SecurityGate {
    * by base name only, plus the class of place it lives in. No command line, no directory, no
    * contents. A model shown this cannot disclose anything it was not shown.
    */
+  /**
+   * Run one synchronous evidence layer in isolation.
+   *
+   * A layer that throws — on malformed content, on a shape it did not expect, on a bug of its own —
+   * contributes the engine-failure evidence and nothing else. The layers after it still run, and the
+   * failure still folds in as a hard ASK. An exception inside the security subsystem can therefore
+   * add friction and never remove any. Before this, the first layer to throw took every layer after
+   * it down with it, and the whole evaluation with them.
+   */
+  function isolate(layer: string, produce: () => SecurityEvidence[]): SecurityEvidence[] {
+    try {
+      return produce()
+    } catch (err) {
+      log.error("layer failed", { layer, error: err instanceof Error ? err.name : "Error" })
+      return [Decision.failed(err)]
+    }
+  }
+
+  /** The same, for a layer that runs as an Effect: its `Exit` carries failures and defects alike. */
+  function guarded(layer: string, exit: Exit.Exit<SecurityEvidence[], unknown>): SecurityEvidence[] {
+    if (Exit.isSuccess(exit)) return exit.value
+    const err = Cause.squash(exit.cause)
+    log.error("layer failed", { layer, error: err instanceof Error ? err.name : "Error" })
+    return [Decision.failed(err)]
+  }
+
   function explanationFacts(
     decision: SecurityDecision,
     action: NormalizedAction,
@@ -364,10 +390,14 @@ export namespace SecurityGate {
         : action.kind === "file"
           ? action.paths.map((value) => ({ path: value, effect: action.effect }))
           : []
-    // Prefer a labelled or non-workspace operand: that is what the decision is usually about.
+    // Prefer a labelled or non-workspace operand: that is what the decision is usually about. Then a
+    // file being *read*, because an outbound command lists both what it sends and where it writes the
+    // reply, and naming the reply file in a sentence about sending data is simply wrong — the notice
+    // for a README-driven upload used to say `curl.out`.
     const chosen =
       operands.find((operand) => operand.path.labels.length > 0) ??
       operands.find((operand) => operand.path.relation !== "workspace") ??
+      operands.find((operand) => operand.effect === "read") ??
       operands[0]
     const store =
       chosen && chosen.path.relation === "home-sensitive"
@@ -413,71 +443,112 @@ export namespace SecurityGate {
       runtime: false,
       classifier: false,
     }
+    // Build the provider as soon as the layer is on, not at the first decision that wants a verdict:
+    // constructing it starts the model graph loading, and until that finishes the layer answers
+    // nothing. Safe either way — an unconfigured provider is `undefined` and nothing happens.
+    if (layers.classifier) classifierProvider()
     const callID = input.request.tool?.callID
     const started = performance.now()
+    /**
+     * The strictest decision this evaluation actually reached, kept outside the scope that computes
+     * it. Anything below can fail — a parser, a layer, a provider, a defect in code that has nothing
+     * to do with the action — and the failure is then folded into what was already established
+     * instead of replacing it. Without this, a DENY reached in the first line was still reversible
+     * by a crash in the last one.
+     */
+    let reached: SecurityDecision | undefined
+    const reach = (next: SecurityDecision) => {
+      reached = next
+      return next
+    }
     const exit = yield* Effect.exit(
       Effect.gen(function* () {
         const env = PathRisk.env({ workspace: input.options.workspace, home: ctx.home })
         const action = yield* normalize(input.request, ctx, env)
-        let decision = SecurityEngine.evaluate(action, ctx)
+        let decision = reach(SecurityEngine.evaluate(action, ctx))
         if (layers.packages) {
-          const packages = yield* packageEvidence(action, decision, ctx)
-          decision = SecurityEngine.extend(decision, packages)
+          const packages = yield* Effect.exit(packageEvidence(action, decision, ctx))
+          decision = reach(SecurityEngine.extend(decision, guarded("packages", packages)))
         }
         if (layers.egress) {
           // Record what this call would read/taint, keyed by the tool call so it is committed only
           // when the call succeeds (see `execute`); fold the egress evidence in monotonically.
-          const egress = EgressGuard.assess({
-            action,
-            sessionID: input.sessionID,
-            ...(layers.content ? { readFile: contentSource } : {}),
+          const egress = isolate("egress", () => {
+            const assessment = EgressGuard.assess({
+              action,
+              sessionID: input.sessionID,
+              ...(layers.content ? { readFile: contentSource } : {}),
+            })
+            if (callID !== undefined) SecuritySessionState.recordPending(input.sessionID, callID, assessment.pending)
+            return assessment.evidence
           })
-          if (callID !== undefined) SecuritySessionState.recordPending(input.sessionID, callID, egress.pending)
-          decision = SecurityEngine.extend(decision, egress.evidence)
+          decision = reach(SecurityEngine.extend(decision, egress))
         }
         if (layers.tools && input.request.security) {
           // Delegated authority: what the tool is allowed to do, who wrote it, and what its arguments
           // touch. Folded through the same reducer, so it can only tighten earlier decisions.
-          const authority = ToolAuthority.assess({
-            invocation: input.request.security,
-            ctx,
-            env,
-            sessionID: input.sessionID,
-            ...(layers.content ? { readFile: contentSource } : {}),
+          const invocation = input.request.security
+          const authority = isolate("tools", () => {
+            const assessment = ToolAuthority.assess({
+              invocation,
+              ctx,
+              env,
+              sessionID: input.sessionID,
+              ...(layers.content ? { readFile: contentSource } : {}),
+            })
+            if (callID !== undefined) SecuritySessionState.recordPending(input.sessionID, callID, assessment.pending)
+            return assessment.evidence
           })
-          if (callID !== undefined) SecuritySessionState.recordPending(input.sessionID, callID, authority.pending)
-          decision = SecurityEngine.extend(decision, authority.evidence)
+          decision = reach(SecurityEngine.extend(decision, authority))
         }
         if (layers.classifier && SemanticEvidence.considers({ decision, action, sessionID: input.sessionID })) {
           // Last, and only for what the deterministic layers left unsettled. It travels through the
           // same monotone reducer as every other layer, which is what makes "the model cannot open
           // anything up" a property of the fold rather than a promise in a comment.
-          const advisory = yield* SemanticEvidence.assess({
-            provider: classifierProvider(),
-            summary: SemanticEvidence.summarize(action, input.sessionID),
-            timeoutMs: SecurityFlag.classifierTimeoutMs(),
-          })
-          decision = SecurityEngine.extend(decision, advisory)
+          const advisory = yield* Effect.exit(
+            SemanticEvidence.assess({
+              provider: classifierProvider(),
+              summary: SemanticEvidence.summarize(action, input.sessionID),
+              timeoutMs: SecurityFlag.classifierTimeoutMs(),
+            }),
+          )
+          decision = reach(SecurityEngine.extend(decision, guarded("classifier", advisory)))
         }
         // The decision is final here. What follows is presentation: a sentence for whoever is about
         // to be asked. It reads the decision and writes nothing back into it.
-        if (decision.action !== "allow")
+        if (decision.action !== "allow") {
+          const facts = explanationFacts(decision, action, input.sessionID)
+          // A model is asked to improve the sentence only where a person is certain to read it: a
+          // hard ask stops an unattended run, and a denial is reported back. A soft ask may be
+          // satisfied by an existing permission rule without anyone ever seeing a prompt, and paying
+          // a second remote call on every one of those buys latency and nothing else. The
+          // deterministic sentence is written either way, so no decision loses its explanation.
+          const shown = decision.hard || decision.action === "deny"
+          // The person reading the notice is the person who typed the request, so their own words go
+          // along as a language sample — redacted, bounded, and never the untrusted text.
+          const goal = SecuritySessionState.goalOf(input.sessionID)
+          // Presentation must never be able to move a decision, so it is not merely expected to
+          // succeed — its failure is caught here and answered with the deterministic sentence. A
+          // provider that throws synchronously used to escape as a defect, fail this whole scope,
+          // and turn a DENY that had already been reached into a hard ask.
+          const written = yield* Effect.exit(
+            RiskExplanation.generate({
+              provider: layers.classifier && shown ? classifierProvider() : undefined,
+              facts,
+              timeoutMs: SecurityFlag.classifierTimeoutMs(),
+              ...(goal ? { request: SemanticEvidence.redact(goal) } : {}),
+            }),
+          )
           decision = {
             ...decision,
-            // `generate` is contractually incapable of failing — including on a provider that throws
-            // synchronously, which used to escape as a defect, fail this scope and turn a DENY into a
-            // hard ask. Presentation must never be able to move a decision.
-            explanation: yield* RiskExplanation.generate({
-              provider: layers.classifier ? classifierProvider() : undefined,
-              facts: explanationFacts(decision, action, input.sessionID),
-              timeoutMs: SecurityFlag.classifierTimeoutMs(),
-            }),
+            explanation: Exit.isSuccess(written) ? written.value : RiskExplanation.template(facts),
           }
+        }
         return decision
       }),
     )
     const durationMs = performance.now() - started
-    const decision = Exit.isSuccess(exit) ? exit.value : Decision.failure(Cause.squash(exit.cause))
+    const decision = Exit.isSuccess(exit) ? exit.value : Decision.failure(Cause.squash(exit.cause), reached)
     report({
       sessionID: input.sessionID,
       permission: input.request.permission,
