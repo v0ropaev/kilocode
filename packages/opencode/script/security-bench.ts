@@ -212,6 +212,20 @@ const advisorySection = advisory.length
         return `| ${config} | ${stats.considered} | ${stats.calls} | ${rate} | ${stats.flagged} | ${categories} | ${stats.errors} | ${stats.timeouts} | ${q(50).toFixed(2)} ms | ${q(95).toFixed(2)} ms |`
       }),
       "",
+      "### Verdict distribution",
+      "",
+      "Every answered verdict, including the ones that produced no evidence. `byCategory` above counts",
+      "only what was acted on, which cannot say how often the layer stays quiet or whether the calls it",
+      "gets wrong are the hedged ones.",
+      "",
+      "| Configuration | RISK/CATEGORY/CONFIDENCE | Count |",
+      "| --- | --- | --: |",
+      ...advisory.flatMap(([config, stats]) =>
+        Object.entries(stats.byVerdict)
+          .sort((a, b) => b[1] - a[1])
+          .map(([verdict, count]) => `| ${config} | \`${verdict}\` | ${count} |`),
+      ),
+      "",
       `_Provider: ${process.env["KILO_SECURITY_AUTO_CLASSIFIER_PROVIDER"] ?? "heuristic"}${classifierModel ? ` (${classifierModel})` : ""}._`,
       ...(classifierModel ? [""].concat(cost()) : []),
     ].join("\n")

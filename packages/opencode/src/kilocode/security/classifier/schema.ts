@@ -52,6 +52,14 @@ export interface Provenance {
   source: string
   name: string
   excerpt: string
+  /**
+   * What the deterministic content classifier made of this text, computed *before* redaction.
+   *
+   * Carried rather than derived, because by the time an excerpt reaches the model its credentials
+   * have been replaced by `[redacted]` — and `[redacted]` reads as a placeholder, which would turn
+   * the one text that certainly holds a secret into the one text that looks explained.
+   */
+  adjudication?: "credential" | "benign" | "unknown"
 }
 
 /** What the model is shown about the action itself: structure, never a command line. */

@@ -33,7 +33,7 @@ import { SecretContent } from "../state/content"
 import { SecuritySessionState } from "../state/store"
 import type { NormalizedAction, NormalizedPath, SecurityDecision, SecurityEvidence } from "../types"
 import { ClassifierBreaker, type ClassifierProvider } from "./provider"
-import type { SemanticInput, Verdict } from "./schema"
+import type { Provenance, SemanticInput, Verdict } from "./schema"
 
 export namespace SemanticEvidence {
   /** Counters for the ablation: cost and reliability are reported, never inferred. */
@@ -45,6 +45,15 @@ export namespace SemanticEvidence {
     considered: number
     latencies: number[]
     byCategory: Record<string, number>
+    /**
+     * Every answered verdict, tallied as `RISK/CATEGORY/CONFIDENCE`, whether or not it produced
+     * evidence.
+     *
+     * `byCategory` only counts what was acted on, which makes the two questions that matter about a
+     * probabilistic layer unanswerable: how often it says nothing, and whether the verdicts it gets
+     * wrong are the ones it hedges on. Both were guesses until this counter existed.
+     */
+    byVerdict: Record<string, number>
   }
 
   const stats: Stats = {
@@ -55,10 +64,16 @@ export namespace SemanticEvidence {
     considered: 0,
     latencies: [],
     byCategory: {},
+    byVerdict: {},
   }
 
   export function snapshot(): Stats {
-    return { ...stats, latencies: [...stats.latencies], byCategory: { ...stats.byCategory } }
+    return {
+      ...stats,
+      latencies: [...stats.latencies],
+      byCategory: { ...stats.byCategory },
+      byVerdict: { ...stats.byVerdict },
+    }
   }
 
   export function reset() {
@@ -70,6 +85,7 @@ export namespace SemanticEvidence {
     stats.considered = 0
     stats.latencies = []
     stats.byCategory = {}
+    stats.byVerdict = {}
   }
 
   /**
@@ -149,19 +165,29 @@ export namespace SemanticEvidence {
   export function redactInput(input: SemanticInput): SemanticInput {
     return {
       action: input.action,
-      provenance: input.provenance.map((item) => ({ ...item, excerpt: redact(item.excerpt) })),
+      provenance: input.provenance.map(outbound),
       ...(input.goal ? { goal: redact(input.goal) } : {}),
+    }
+  }
+
+  /**
+   * One excerpt, prepared to leave: redacted, and carrying what the deterministic content classifier
+   * made of it. Both halves have to happen here, in this order — the adjudication reads the original
+   * text, and after redaction that text no longer exists.
+   */
+  function outbound(item: { source: string; name: string; excerpt: string }): Provenance {
+    return {
+      source: item.source,
+      name: item.name,
+      excerpt: redact(item.excerpt),
+      adjudication: SecretContent.adjudicate(item.excerpt, { file: item.name }),
     }
   }
 
   /** Assemble what the model is shown. Structure and bounded excerpts; never a command line. */
   export function summarize(action: NormalizedAction, sessionID: string): SemanticInput | undefined {
     const readSecret = SecuritySessionState.hasSecretContext(sessionID)
-    const provenance = SecuritySessionState.ingestedOf(sessionID).map((item) => ({
-      source: item.source,
-      name: item.name,
-      excerpt: redact(item.excerpt),
-    }))
+    const provenance = SecuritySessionState.ingestedOf(sessionID).map(outbound)
     const recorded = SecuritySessionState.goalOf(sessionID)
     const goal = recorded === undefined ? undefined : redact(recorded)
     if (action.kind === "permission")
@@ -199,7 +225,33 @@ export namespace SemanticEvidence {
   /** Test seam: forget a tripped breaker. */
   export const resetBreaker = ClassifierBreaker.reset
 
-  function evidenceFor(verdict: Verdict, hard: boolean): SecurityEvidence {
+  /**
+   * Has the deterministic layer already answered the question this verdict asks?
+   *
+   * `DATA_EXFILTRATION` is a claim about one thing: whether the content going out is credential
+   * material. `SecretContent` answers exactly that, on exactly those bytes, with named rules — and
+   * where it has affirmatively explained every suspicious value in every excerpt, the model is not
+   * contributing information, it is disagreeing with a rule. A disagreement is worth showing a
+   * person; it is not grounds to stop an unattended run.
+   *
+   * Deliberately narrow. It needs *every* excerpt explained, so one unrecognised opaque value hands
+   * full authority back — which is the case the layer was measured to be valuable in, and the case
+   * both remaining content attacks fall into. The other categories are untouched: the content
+   * classifier has no opinion about whether text instructs an agent, so it cannot settle
+   * `PROMPT_INJECTION`, and a mismatch with the user's request is not a question about bytes.
+   */
+  export function settled(summary: SemanticInput, verdict: Verdict): boolean {
+    if (verdict.category !== "DATA_EXFILTRATION") return false
+    // A session that has already read credential material is not settled by what the excerpts hold:
+    // the thing that might be leaving need not appear in any of them. In practice such a session is
+    // stopped deterministically and never reaches this layer at all, so this closes a gap in the
+    // argument rather than a gap in the behaviour — which is the right time to close one.
+    if (summary.action.readSecret) return false
+    if (summary.provenance.length === 0) return false
+    return summary.provenance.every((item) => item.adjudication === "benign")
+  }
+
+  function evidenceFor(verdict: Verdict, hard: boolean, settledByRule = false): SecurityEvidence {
     return Decision.evidence({
       rule: hard ? "advisory.semantic.escalate" : "advisory.semantic.flag",
       // `hard` survives a permissive rule and stops an unattended run. Still an ASK either way: the
@@ -208,7 +260,15 @@ export namespace SemanticEvidence {
       action: "ask",
       reasonCode: verdict.category === "USER_GOAL_MISMATCH" ? "UNCLASSIFIED_ACTION" : "NETWORK_EGRESS",
       message: "A semantic review flagged this outbound action for a person to confirm.",
-      attributes: { advisory: true, category: verdict.category, confidence: verdict.confidence },
+      // The whole verdict, not the half of it that survived the policy: an audit trail that omits how
+      // sure the model was cannot answer whether the escalations it got wrong were the hedged ones.
+      attributes: {
+        advisory: true,
+        category: verdict.category,
+        risk: verdict.risk,
+        confidence: verdict.confidence,
+        ...(settledByRule ? { settled: true } : {}),
+      },
     })
   }
 
@@ -242,13 +302,21 @@ export namespace SemanticEvidence {
    *
    * No threshold on a self-reported number. Three labels, three coarse outcomes.
    */
-  export function policy(verdict: Verdict, mode: Sensitivity = sensitivity()): SecurityEvidence[] {
+  export function policy(
+    verdict: Verdict,
+    mode: Sensitivity = sensitivity(),
+    /** True when a deterministic rule has already settled this verdict's question — see {@link settled}. */
+    known = false,
+  ): SecurityEvidence[] {
+    // One place decides how far a verdict carries, so a bound on its authority cannot be added in
+    // one branch and forgotten in another.
+    const escalate = (hard: boolean) => [evidenceFor(verdict, hard && !known, hard && known)]
     if (verdict.risk === "SUSPICIOUS" && verdict.confidence === "MEDIUM" && mode === "balanced")
-      return [evidenceFor(verdict, false)]
+      return escalate(false)
     if (verdict.risk === "HIGH_RISK" && (verdict.confidence === "HIGH" || verdict.confidence === "MEDIUM"))
-      return [evidenceFor(verdict, true)]
-    if (verdict.risk === "HIGH_RISK") return [evidenceFor(verdict, false)]
-    if (verdict.risk === "SUSPICIOUS" && verdict.confidence === "HIGH") return [evidenceFor(verdict, false)]
+      return escalate(true)
+    if (verdict.risk === "HIGH_RISK") return escalate(false)
+    if (verdict.risk === "SUSPICIOUS" && verdict.confidence === "HIGH") return escalate(false)
     return []
   }
 
@@ -320,6 +388,8 @@ export namespace SemanticEvidence {
     if (outcome.kind === "error") stats.errors += 1
     ClassifierBreaker.record(outcome.kind === "ok")
     if (outcome.kind !== "ok") return [] as SecurityEvidence[]
+    const seen = `${outcome.value.risk}/${outcome.value.category}/${outcome.value.confidence}`
+    stats.byVerdict[seen] = (stats.byVerdict[seen] ?? 0) + 1
     // A verdict about the user's intent requires knowing it. With no request recorded there is
     // nothing to compare against, and a model asked anyway will answer from the absence — which is
     // how "we do not know what you wanted" turns into friction on ordinary work. Measured: with the
@@ -327,7 +397,7 @@ export namespace SemanticEvidence {
     // a structural guard rather than a line in the prompt, because a line in the prompt is a request.
     if (outcome.value.category === "USER_GOAL_MISMATCH" && summary.goal === undefined)
       return [] as SecurityEvidence[]
-    const evidence = policy(outcome.value)
+    const evidence = policy(outcome.value, sensitivity(), settled(summary, outcome.value))
     if (evidence.length > 0) {
       stats.flagged += 1
       stats.byCategory[outcome.value.category] = (stats.byCategory[outcome.value.category] ?? 0) + 1

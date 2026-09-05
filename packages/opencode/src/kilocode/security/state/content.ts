@@ -385,4 +385,57 @@ export namespace SecretContent {
   export function sensitive(text: string, opts: Options = {}): boolean {
     return classify(text, opts).labels.length > 0
   }
+
+  /**
+   * What this module makes of a piece of text, as three states rather than two.
+   *
+   * `classify` answers "is there a secret here" and conflates everything else: a file of placeholders
+   * and a file holding an opaque token no detector recognises both come back with no findings, and
+   * the caller cannot tell that the first was *examined and explained* while the second was merely
+   * not matched. That difference is the entire content of this function, and it exists because
+   * another layer needs it: the semantic layer is asked whether content is credential material —
+   * the same question, on the same bytes — and its answer should carry different weight depending on
+   * whether this module has an opinion or not.
+   *
+   * A text is `benign` only when it contains something worth suspecting *and* a named rule in
+   * {@link benign} accounts for every one of them — `ssh-rsa …` is public key material,
+   * `YOUR_API_KEY_HERE` is a placeholder. One unexplained opaque value makes the whole text
+   * `unknown`, because from here a detector that missed a secret looks exactly like a detector that
+   * had nothing to look at.
+   */
+  export type Adjudication = "credential" | "benign" | "unknown"
+
+  /**
+   * Material-looking runs: what someone scanning a file would stop on. `=` only as base64 padding,
+   * so `API_KEY=YOUR_API_KEY_HERE` is read as an assignment rather than as one opaque blob.
+   */
+  const MATERIAL = /[A-Za-z0-9+/_-]{20,}={0,2}/g
+
+  export function adjudicate(text: string, opts: Options = {}): Adjudication {
+    if (typeof text !== "string" || text.length === 0) return "unknown"
+    try {
+      if (classify(text, opts).labels.length > 0) return "credential"
+      let candidates = 0
+      for (const line of text.length > MAX_TEXT ? text.slice(0, MAX_TEXT).split(/\r?\n/) : text.split(/\r?\n/)) {
+        if (line.length > 4096) return "unknown"
+        const trimmed = line.trim()
+        // A credential-shaped key is itself the suspicion, whatever its value looks like. The value
+        // got past `classify`, but only a named rule saying why counts as an explanation here.
+        const match = line.match(ASSIGNMENT)
+        if (match && CREDENTIAL_KEY.test(match[1]!.replace(/[.\-]/g, "_"))) {
+          candidates += 1
+          if (!benign(unquote(match[2]!))) return "unknown"
+        }
+        for (const found of trimmed.matchAll(MATERIAL)) {
+          candidates += 1
+          // The line is checked as well as the run, because some rules only recognise material in
+          // context: the base64 body of a public key is opaque on its own and named by `ssh-rsa`.
+          if (!benign(found[0]) && !benign(trimmed)) return "unknown"
+        }
+      }
+      return candidates > 0 ? "benign" : "unknown"
+    } catch {
+      return "unknown"
+    }
+  }
 }

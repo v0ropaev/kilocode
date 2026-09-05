@@ -60,35 +60,42 @@ export interface Score {
  */
 export interface Pass {
   verdicts: Verdict[]
+  /** What was actually sent, kept so scoring can apply the same bound the product applies. */
+  prepared: SemanticInput[]
   latencies: number[]
   errors: number
 }
 
 export async function classifyAll(provider: ClassifierProvider, cases: ScorableCase[]): Promise<Pass> {
   const verdicts: Verdict[] = []
+  const prepared: SemanticInput[] = []
   const latencies: number[] = []
   let errors = 0
   for (const item of cases) {
     const controller = new AbortController()
     const started = performance.now()
+    // Through the same preparation the product applies: redaction, because several cases turn on a
+    // file holding credentials and what reaches a model is the key names with the values replaced;
+    // and the content classifier's adjudication, because that is what bounds how far the answer
+    // carries. Scoring the raw case would measure a pipeline that does not ship.
+    const input = SemanticEvidence.redactInput(item.input)
+    prepared.push(input)
     try {
-      // Through the same redaction the product applies. Scoring the raw case would measure a
-      // pipeline that does not ship: several cases turn on a file holding credentials, and what
-      // actually reaches a model is the key names with the values replaced.
-      verdicts.push(await provider.classify(SemanticEvidence.redactInput(item.input), controller.signal))
+      verdicts.push(await provider.classify(input, controller.signal))
     } catch {
       errors += 1
       verdicts.push(NO_SIGNAL)
     }
     latencies.push(performance.now() - started)
   }
-  return { verdicts, latencies, errors }
+  return { verdicts, prepared, latencies, errors }
 }
 
 export function scorePass(cases: ScorableCase[], pass: Pass, mode: SemanticEvidence.Sensitivity): Score {
   const outcomes = cases.map((item, index): Outcome => {
     const verdict = pass.verdicts[index] ?? NO_SIGNAL
-    const evidence = SemanticEvidence.policy(verdict, mode)
+    const sent = pass.prepared[index]
+    const evidence = SemanticEvidence.policy(verdict, mode, sent ? SemanticEvidence.settled(sent, verdict) : false)
     const escalated = evidence.length > 0
     return {
       id: item.id,
