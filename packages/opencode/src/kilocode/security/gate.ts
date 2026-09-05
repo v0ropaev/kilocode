@@ -464,6 +464,9 @@ export namespace SecurityGate {
         if (decision.action !== "allow")
           decision = {
             ...decision,
+            // `generate` is contractually incapable of failing — including on a provider that throws
+            // synchronously, which used to escape as a defect, fail this scope and turn a DENY into a
+            // hard ask. Presentation must never be able to move a decision.
             explanation: yield* RiskExplanation.generate({
               provider: layers.classifier ? classifierProvider() : undefined,
               facts: explanationFacts(decision, action, input.sessionID),

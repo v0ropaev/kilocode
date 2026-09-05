@@ -1580,13 +1580,19 @@ export const layer = Layer.effect(
         // words, for the semantic layer to compare an action against. Evidence about intent and
         // never authority — a request that names a dangerous action does not permit it, it only
         // makes the mismatch signal quieter. Bounded and stored in memory by the session state.
-        SecuritySessionState.recordGoal(
-          sessionID,
-          lastUserParts
-            .filter((part) => part.type === "text")
-            .map((part) => part.text)
-            .join("\n"),
-        )
+        //
+        // `synthetic` parts are excluded, and that exclusion is the whole point. A subagent's "user"
+        // message is the task tool's prompt, written by the model, and a background task injects
+        // rendered subagent output the same way — both under a session whose state resolves to the
+        // same root. Without this filter, model-authored text (steerable by whatever the model just
+        // read) would overwrite the human's goal in shared state, and the one input this layer treats
+        // as coming from the person would be the one an attacker can reach.
+        const ownWords = lastUserParts
+          .filter((part) => part.type === "text")
+          .filter((part) => part.synthetic !== true)
+          .map((part) => part.text)
+          .join("\n")
+        if (ownWords.trim().length > 0) SecuritySessionState.recordGoal(sessionID, ownWords)
         // kilocode_change end
 
         // Some providers return "stop" even when the assistant message contains
