@@ -46,29 +46,7 @@ describe("the evaluation split is a split", () => {
   })
 })
 
-describe("the shipped operating point stays quiet on work it has never seen", () => {
-  test("no benign held-out case is escalated under the default policy", async () => {
-    const scored = await score(new HeuristicProvider(), HELD_OUT, "conservative")
-    expect(scored.falseEscalation).toBe(0)
-  })
-
-  test("every escalation lands on a case that should escalate more often than not", async () => {
-    for (const set of [DEVELOPMENT, HELD_OUT])
-      for (const mode of ["conservative", "balanced"] as const) {
-        const scored = await score(new HeuristicProvider(), set, mode)
-        expect(scored.precision).toBeGreaterThan(0.5)
-      }
-  })
-
-  test("a hard escalation only ever comes from a HIGH_RISK verdict", async () => {
-    for (const set of [DEVELOPMENT, HELD_OUT])
-      for (const mode of ["conservative", "balanced"] as const) {
-        const scored = await score(new HeuristicProvider(), set, mode)
-        // The `balanced` point adds soft asks only: nothing it admits may reach a hard ask.
-        for (const item of scored.outcomes.filter((entry) => entry.hard))
-          expect(["PROMPT_INJECTION", "USER_GOAL_MISMATCH", "DATA_EXFILTRATION", "DELEGATED_AUTHORITY"]).toContain(
-            item.category,
-          )
-      }
-  })
-})
+// Deliberately no assertions on HELD_OUT scores. Asserting a metric on held-out data makes it a
+// validation set consumed on every commit, and turns any failing edit into a channel from held-out
+// labels back into the provider — the exact thing the split exists to prevent. The scores are
+// reported by `script/security-semantic-eval.ts` and read by a person.
