@@ -420,7 +420,7 @@ Only these, from `packages/ui/src/components/icon.tsx`:
 |---|---|---|
 | Trigger left | `folder` | Always, regardless of project state. |
 | Trigger right | `selector` | Same as every other `.am-selector-trigger`. |
-| Option row, normal | `folder` | |
+| Option row, normal | `folder` |  |
 | Option row, untrusted | `lock` | Matches the sidebar accordion affordance. |
 | Option row, missing | `warning` | Matches the sidebar accordion affordance. |
 | Option row, selected | `check-small` | Right-aligned. |

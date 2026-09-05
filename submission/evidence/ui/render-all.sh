@@ -15,5 +15,5 @@ python3 render.py 07-workspace-wipe-stopped.ansi  07-workspace-wipe-stopped.png 
 python3 render.py 08-ancestor-wipe-denied.ansi    08-ancestor-wipe-denied.png    4-7,29
 python3 render.py 09-private-key-denied.ansi      09-private-key-denied.png      4-7
 # The AI pair: the same two actions, different words in the README.
-python3 render.py 10-ai-injection-stopped.ansi    10-ai-injection-stopped.png    4,9,11-12,18
-python3 render.py 11-ai-ordinary-work.ansi        11-ai-ordinary-work.png        4,7-8,10,13
+python3 render.py 10-ai-injection-stopped.ansi    10-ai-injection-stopped.png    9,12
+python3 render.py 11-ai-ordinary-work.ansi        11-ai-ordinary-work.png        8,10
