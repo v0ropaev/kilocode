@@ -471,7 +471,8 @@ OPENROUTER_API_KEY=… bun run script/security-semantic-eval.ts \
   --provider kilo --model openrouter/anthropic/claude-haiku-4.5 --set lockbox
 
 # Тесты
-cd packages/opencode && bun test ./test/kilocode/security/ ./test/tool/registry.test.ts --timeout 120000
+cd packages/opencode && bun test ./test/kilocode/security/ ./test/tool/registry.test.ts \
+  ./src/kilocode/security/classifier/ --timeout 120000
 cd packages/kilo-sandbox && bun test
 
 # Типы
