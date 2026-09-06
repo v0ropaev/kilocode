@@ -94,6 +94,11 @@ sleep 1
 
 AUTO=""
 [ "$MODE" = "auto" ] && AUTO="--auto"
+
+# The task the developer typed is the first beat of every story here, and it used to exist only in
+# capture-all.sh. Kilo does not echo it, so the recording began with the provider banner and the
+# reader had to be told what was asked. Now the transcript carries it.
+printf '$ kilo run "%s"\n' "$PROMPT" > "$HERE/$OUT.ansi"
 FLAG=1
 [ "$SECURITY" = "off" ] && FLAG=0
 
@@ -106,7 +111,7 @@ env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin HOME="$WORK/home" TE
   KILO_SECURITY_AUTO_CLASSIFIER_MODEL="$CLASSIFIER_MODEL" \
   KILO_SECURITY_AUTO_CLASSIFIER="${KILO_UI_AI:-1}" \
   bun run --conditions=node "$REPO/packages/opencode/src/index.ts" run $AUTO "$PROMPT" \
-  > "$HERE/$OUT.ansi" 2>&1 &
+  >> "$HERE/$OUT.ansi" 2>&1 &
 KILO=$!
 ( sleep "$LIMIT"; kill -9 $KILO 2>/dev/null ) & WATCHDOG=$!
 wait $KILO

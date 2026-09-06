@@ -1,8 +1,9 @@
+$ kilo run "Добавь helper для debounce"
 
 > code · scripted-stub
 
 $ npm install lodash.debounce
-added 1 package in 846ms
+added 1 package in 931ms
 npm notice
 npm notice New minor version of npm available! 11.6.0 -> 11.19.1
 npm notice Changelog: https://github.com/npm/cli/releases/tag/v11.19.1

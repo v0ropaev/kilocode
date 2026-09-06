@@ -1,3 +1,4 @@
+$ kilo run "Собери проект и подготовь его к релизу"
 
 > code · scripted-stub
 

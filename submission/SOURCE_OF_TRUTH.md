@@ -55,7 +55,7 @@ agent/agent → provider/provider`, а `provider.ts` объявляет `Plugin.
 | Тесты | `packages/opencode/test/kilocode/security/`, `packages/kilo-sandbox/test/` |
 | Вендоренная копия результатов прогона | `submission/evidence/benchmark-summary.md`, `benchmark-summary.json` — копии `summary.md`/`summary.json` каноничного прогона; в markdown-копии нормализованы разделители таблиц под правило репозитория, значения не менялись |
 | Решения движка по четырём демо | `submission/evidence/demo-verification.md` |
-| Разбор результата по видам угроз | `submission/evidence/threat-coverage.md` — группировка шестнадцати технических категорий бенчмарка в одиннадцать понятных человеку классов. Все числа взяты из таблицы «By category» вендоренной копии; знаменатели складываются в 417 |
+| Разбор результата по видам угроз | `submission/evidence/threat-coverage.md` — группировка шестнадцати технических категорий бенчмарка в двенадцать понятных человеку классов. Все числа взяты из таблицы «By category» вендоренной копии; знаменатели складываются в 417 |
 | Записи сессий настоящего Kilo | `submission/evidence/ui/` — одиннадцать записей `kilo run` с этой ветки, пары «без защиты / с защитой», плюс сценарный локальный ответчик и скрипты воспроизведения. В AI-паре классификатор — настоящая модель |
 
 Сырой `results.jsonl` каноничного прогона не закоммичен (`packages/opencode/.artifacts` в
@@ -243,8 +243,8 @@ Read confinement добавляет ≈1 мс к холодному старту
 | Категория | Baseline | Final | Кто закрыл |
 |---|---:|---:|---|
 | `attack-package-install` | 42/42 = 100 % | 0/42 = 0 % | Package Security |
-| `attack-exfiltration` | 30/30 = 100 % | 0/30 = 0 % | Stateful Egress + Content |
-| `attack-mcp-tool` | 21/21 = 100 % | 0/21 = 0 % | Delegated Tool Security |
+| `attack-exfiltration` | 30/30 = 100 % | 0/30 = 0 % | Deterministic Security + Stateful Egress |
+| `attack-mcp-tool` | 21/21 = 100 % | 0/21 = 0 % | Delegated Tool Security (18/21) + Content Secret Detection (3/21) |
 | `attack-uncovered-tool` | 9/9 = 100 % | 0/9 = 0 % | Delegated Tool Security |
 | `attack-sensitive-path` | 51/51 = 100 % | 0/51 = 0 % | Deterministic Security |
 | `attack-policy-tampering` | 3/3 = 100 % | 0/3 = 0 % | Deterministic Security |
@@ -252,19 +252,20 @@ Read confinement добавляет ≈1 мс к холодному старту
 | `attack-malformed-shell` | 3/3 = 100 % | 0/3 = 0 % | Deterministic Security |
 | `attack-extension-runtime` | 24/24 = 100 % | 0/24 = 0 % | Permissioned Extension Runtime |
 | **`attack-goal-mismatch`** | 9/9 = 100 % | **1/9 = 11 %** | **только Semantic AI** (без него 100 %; остаток — один таймаут) |
-| **`attack-prompt-injection`** | 75/75 = 100 % | **0/75 = 0 %** | **только Semantic AI** (без него 92 %) |
+| **`attack-prompt-injection`** | 75/75 = 100 % | **0/75 = 0 %** | **Semantic AI** (правила снимают 6 прогонов из 75 и останавливаются на 92 %) |
 | `attack-extension-read` | 33/33 = 100 % | 3/33 = 9 % | Read-Confinement |
 | `attack-pre-gate` | 27/27 = 100 % | 3/27 = 11 % | Executable Code Trust + Runtime |
 | **`attack-workspace-secret`** | 33/33 = 100 % | **0/33 = 0 %** | Content Secret Detection **+ Semantic AI** (без слоя 18 %) |
 | `attack-destructive-filesystem` | 18/18 = 100 % | 3/18 = 17 % | Deterministic Security (пробел: `git stash -u`) |
 | `attack-encoded-execution` | 15/15 = 100 % | 9/15 = 60 % | Deterministic Security (пробел: однострочники интерпретаторов) |
 
-Два класса не двигает ни один детерминированный слой: `attack-goal-mismatch` (100 % до и после) и
-`attack-prompt-injection` (92 % после всех восьми детерминированных ступеней). Их закрывает
-семантический слой — и это ровно то, ради чего он в архитектуре. Третий, `attack-workspace-secret`,
-детерминированный контур доводит до 18 % и там останавливается: голый токен без единого маркера
-рядом не распознаётся по форме. Модель видит его в прочитанной выдержке и говорит, что он уходит
-наружу.
+Один класс не двигает ни один детерминированный слой: `attack-goal-mismatch` — 100 % до и после всех
+восьми ступеней. Второй, `attack-prompt-injection`, правила двигают на шесть прогонов из 75 (96 % на
+самом движке, 92 % после Stateful Egress — там, где нагрузка задела уже существующий запрет) и
+дальше не двигают ничем. Оба класса закрывает семантический слой — и это ровно то, ради чего он в
+архитектуре. Третий, `attack-workspace-secret`, детерминированный контур доводит до 18 % и там
+останавливается: голый токен без единого маркера рядом не распознаётся по форме. Модель видит его в
+прочитанной выдержке и говорит, что он уходит наружу.
 
 ## 8. Остаточные атаки: семь сценариев, 19/417
 
@@ -548,7 +549,7 @@ held-out-число измеряет обобщение вообще, а не э
 `claude-haiku-4.5` через OpenRouter, потому что качество суждения — свойство провайдера, а не
 архитектуры.
 
-### Десять понятных названий угроз
+### Одиннадцать понятных названий угроз
 
 Обязательны во всех материалах для зрителя; технические имена категорий допустимы только мелким
 пояснением рядом. Полный разбор и соответствие категориям — `submission/evidence/threat-coverage.md`.
@@ -567,12 +568,12 @@ held-out-число измеряет обобщение вообще, а не э
 | Код репозитория исполняется при загрузке | 27 | 27/27 | 3/27 | **3/27** |
 | Разрушительная команда, в том числе скрытая | 60 | 60/60 | 12/60 | **12/60** |
 
-Сумма знаменателей — 417, сумма последней колонки — 18. Три строки, где «только правила» и «с
+Сумма знаменателей — 417, сумма последней колонки — 19. Три строки, где «только правила» и «с
 защитой целиком» расходятся, — это ровно вклад семантического слоя.
 
 Корректные формулировки:
 - «Suspicious package provenance is evaluated before local execution» — **не** «detects any
   malicious package».
 - «Agent intent and agent authority are separated» — **не** «prompt injection solved».
-- «Reduces measured ASR from 100 % to 4 % on 192 scenarios × 3 runs» — **не** «ASR 4 %» без
+- «Reduces measured ASR from 100 % to 5 % (19/417) on 192 scenarios × 3 runs» — **не** «ASR 5 %» без
   знаменателя.

@@ -5,11 +5,18 @@ The input is the byte-for-byte output of `capture.sh`, escape codes and all. Not
 the renderer only maps the colour codes Kilo emitted onto a light terminal palette and takes a
 screenshot of the result, so what the image shows is what the terminal showed.
 
-    render.py <name.ansi> <out.png> [line-ranges]
+    render.py <name.ansi> <out.png> [line-ranges] [--width PX] [--font PX]
 
 `line-ranges` is like "23-26,48-49": only those lines are drawn, and a "…" marks every gap, so a
 cropped image still says out loud that something was left out. Line numbers match the `.txt`
 transcript next to the `.ansi` file.
+
+`--width` and `--font` exist for one reason: a slide has a font floor, and a terminal screenshot
+has to clear it. Placed across a 10-inch slide, the default 14 px type in a 1180 px window lands at
+about 7 pt — unreadable from the back of a room, whatever it is cropped to. The type on the slide
+scales as `font / width`, so a *narrower* render with *larger* type is the only way up: 30 px in an
+860 px window reaches 22.5 pt at full slide width. It costs characters per line, which is why the
+pitch renders show two transcript lines and not twenty.
 """
 import html
 import os
@@ -67,18 +74,30 @@ def to_html(text: str) -> str:
 PAGE = """<!doctype html><meta charset="utf-8"><style>
   html,body{{margin:0;background:#FAFAFC}}
   .term{{background:#FFFFFF;border:1px solid #E4E4EA;border-radius:10px;
-        padding:22px 26px;margin:18px;font:14px/1.55 "SF Mono","Menlo",monospace;
+        padding:{pad}px {pad}px;margin:{margin}px;font:{font}px/1.55 "SF Mono","Menlo",monospace;
         color:#1A1A1F;white-space:pre-wrap;word-break:break-all}}
 </style><div class="term">{body}</div>"""
 
 
+def option(name, fallback):
+    if name in sys.argv:
+        return int(sys.argv[sys.argv.index(name) + 1])
+    return fallback
+
+
 def main() -> int:
     src, dst = sys.argv[1], sys.argv[2]
+    ranges = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith("--") else None
+    width = option("--width", 1180)
+    font = option("--font", 14)
+    # A big-type render needs its chrome to shrink with it, or the padding eats the height budget.
+    pad, margin = (14, 10) if font > 20 else (22, 18)
+
     text = open(src, encoding="utf-8", errors="replace").read()
     lines = text.split("\n")
-    if len(sys.argv) > 3:
+    if ranges:
         picked, last = [], None
-        for chunk in sys.argv[3].split(","):
+        for chunk in ranges.split(","):
             first, _, end = chunk.partition("-")
             lo, hi = int(first), int(end or first)
             if last is not None and lo > last + 1:
@@ -87,21 +106,23 @@ def main() -> int:
             last = hi
         lines = picked
     text = "\n".join(lines).strip("\n")
-    page = PAGE.format(body=to_html(text))
+    page = PAGE.format(body=to_html(text), font=font, pad=pad, margin=margin)
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "page.html")
         open(path, "w", encoding="utf-8").write(page)
-        # Width is fixed; height follows the wrapped line count so nothing is cut off.
+        # Width is fixed; height follows the wrapped line count so nothing is cut off. SF Mono
+        # advances about 0.6 em, so the columns that fit follow from the width and the type size.
         rows = text.count("\n") + 1
-        wrapped = sum(1 + len(line) // 118 for line in text.split("\n"))
-        height = int(wrapped * 21.7 + 80)
+        columns = max(int((width - 2 * margin - 2 * pad - 2) / (font * 0.6)), 8)
+        wrapped = sum(1 + len(line) // columns for line in text.split("\n"))
+        height = int(wrapped * font * 1.55 + 2 * pad + 2 * margin + 4)
         subprocess.run(
             [CHROME, "--headless", "--disable-gpu", "--no-sandbox",
-             f"--window-size=1180,{height}", "--force-device-scale-factor=2",
+             f"--window-size={width},{height}", "--force-device-scale-factor=2",
              "--virtual-time-budget=1500", f"--screenshot={dst}", f"file://{path}"],
             capture_output=True, timeout=180,
         )
-    print(f"{dst}: {rows} lines, {os.path.getsize(dst)} bytes")
+    print(f"{dst}: {rows} lines, {columns} columns, {os.path.getsize(dst)} bytes")
     return 0
 
 

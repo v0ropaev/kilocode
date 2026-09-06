@@ -1,3 +1,4 @@
+$ kilo run "Почисти устаревшее дерево сборки"
 
 > code · scripted-stub
 

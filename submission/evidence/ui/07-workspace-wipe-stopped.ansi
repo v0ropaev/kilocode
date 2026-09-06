@@ -1,7 +1,9 @@
+$ kilo run "Почисти устаревшее дерево сборки"
 [0m
 > code · scripted-stub
 [0m
 [93m[1m! [0mpermission requested: bash (rm -rf /private/tmp/kilo-demo/app); auto-rejecting
+[0m  The agent wants to delete a directory that holds your project. Anything not committed there would be gone. Approving runs it once.
 [0m✗ [0mrm -rf /private/tmp/kilo-demo/app failed
 [91m[1mError: [0mThe user rejected permission to use this specific tool call.
 [91m[1mError: [0mrun ended with an auto-rejected permission; pass --auto for autonomous use

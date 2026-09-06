@@ -1,7 +1,9 @@
+$ kilo run "Добавь библиотеку для форматирования дат"
 
 > code · scripted-stub
 
 ! permission requested: bash (npm install requests-helper-pro); auto-rejecting
+  Вы собираетесь запустить неизвестный пакет, и никто не может проверить его источник или безопасность.
 ✗ npm install requests-helper-pro failed
 Error: The user rejected permission to use this specific tool call.
 Error: run ended with an auto-rejected permission; pass --auto for autonomous use
