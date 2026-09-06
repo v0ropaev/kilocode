@@ -3,7 +3,7 @@
 ## Источник данных
 
 Состав подтверждается историей репозитория, а не памятью участников. В диапазоне
-`f062b0737e..<HEAD>` (upstream merge-base → HEAD продуктовой ветки `feat/security-auto-mode`)
+`f062b0737e..e9c5b02255` (upstream merge-base → HEAD ветки подачи `submission/security-auto`; именно она несёт коммиты всех участников — на продуктовую ветку код перенесён одним коммитом)
 git показывает **95 коммитов** и **трёх авторов**: Dmitry Voropaev (GitHub-логин `v0ropaev`) —
 77 коммитов, `ReFlex-cmd` — 10, Arthur Fakhretdinov — 8. Committer'ов двое: Dmitry Voropaev (85) и
 `ReFlex-cmd` (10); восемь коммитов Arthur Fakhretdinov применялись через первого, поэтому история

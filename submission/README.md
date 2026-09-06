@@ -359,7 +359,7 @@ is not something you asked for.» вместо кода правила; во в�
 
 ## Как воспроизвести
 
-Продуктовая ветка `feat/security-auto-mode`, HEAD `<HEAD>`,
+Продуктовая ветка `feat/security-auto-mode`, HEAD `d48d697ae7191cf4c9caa25aa2ad68dab2324736`,
 общий предок с `origin/main` — `f062b0737eb6969644ab3fea7b391b8049401e4a`. Вне `submission/` ветка
 подачи отличается от продуктовой только файлами документации в `docs/`: продуктового кода в этой
 разнице нет. Точный перечень и доказательство — в [SOURCE_OF_TRUTH.md](SOURCE_OF_TRUTH.md).
@@ -375,7 +375,7 @@ git clone https://github.com/v0ropaev/kilocode.git
 cd kilocode
 git checkout submission/security-auto     # материалы подачи + весь код безопасности
 # либо только продуктовая ветка без материалов подачи:
-# git checkout feat/security-auto-mode    # HEAD <HEAD>
+# git checkout feat/security-auto-mode    # HEAD d48d697ae7191cf4c9caa25aa2ad68dab2324736
 bun install
 ```
 
