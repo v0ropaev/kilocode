@@ -5,46 +5,23 @@ import path from "path"
 import { Global } from "@opencode-ai/core/global"
 import { SandboxStore } from "../../../src/kilocode/sandbox/store"
 import { PathRisk } from "../../../src/kilocode/security/path"
+import { classificationFixture } from "./fixture"
 
-const root = await fs.mkdtemp(path.join(os.tmpdir(), "kilo-security-path-"))
-const real = await fs.realpath(root)
-const home = path.join(real, "home")
-const ws = path.join(home, "code", "app")
-// The fixture home lives under the OS temp dir, so use an explicit temp root list to keep the
-// classification of "temp" vs "external" meaningful.
-const env = PathRisk.env({
-  workspace: { directory: ws, worktree: ws },
-  home,
-  temp: ["/tmp", "/private/tmp", "/var/tmp"],
-  // macOS keeps the temp dir under /private/var, so keep the system list to roots the fixture never touches.
-  system: [
-    "/etc",
-    "/usr",
-    "/bin",
-    "/sbin",
-    "/System",
-    "/Library",
-    "/dev",
-    "/boot",
-    "/proc",
-    "/sys",
-    "/home",
-    "/Users",
-    "/opt",
-  ],
-})
+// The fixture declares its own home, temp root and external directory, so "external" cannot be
+// swallowed by whichever temp root the OS happens to put the fixture under. See ./fixture.ts.
+const fixture = await classificationFixture("kilo-security-path-", ["code", "app"])
+const { home, ws, temp, external, env } = fixture
 
 beforeAll(async () => {
   await fs.mkdir(path.join(home, ".ssh"), { recursive: true })
   await fs.mkdir(path.join(ws, "src"), { recursive: true })
-  await fs.mkdir(path.join(real, "elsewhere"), { recursive: true })
   await fs.writeFile(path.join(home, ".ssh", "id_rsa"), "")
   await fs.symlink(path.join(home, ".ssh"), path.join(ws, "keys"))
-  await fs.symlink(path.join(ws, "src"), path.join(real, "elsewhere", "srclink"))
+  await fs.symlink(path.join(ws, "src"), path.join(external, "srclink"))
 })
 
 afterAll(async () => {
-  await fs.rm(root, { recursive: true, force: true })
+  await fixture.cleanup()
 })
 
 const at = (input: string, cwd: string | undefined = ws) => PathRisk.classify(input, cwd, env)
@@ -100,9 +77,9 @@ describe("PathRisk classification", () => {
     expect(at("/dev/sda").labels).toContain("device")
     expect(at("/dev/null").labels).not.toContain("device")
     expect(at("/etc/cron.d/job").labels).toContain("shell-persistence")
-    expect(at("/tmp/scratch/x").relation).toBe("temp")
-    expect(at("/tmp").relation).toBe("external")
-    expect(at(path.join(real, "elsewhere", "x")).relation).toBe("external")
+    expect(at(path.join(temp, "scratch", "x")).relation).toBe("temp")
+    expect(at(temp).relation).toBe("external")
+    expect(at(path.join(external, "x")).relation).toBe("external")
     expect(at(path.dirname(ws)).labels).toContain("workspace-ancestor")
     expect(at(home).labels).toContain("workspace-ancestor")
   })
@@ -126,7 +103,7 @@ describe("PathRisk classification", () => {
     expect(linked.relation).toBe("home-sensitive")
     expect(linked.symlink).toBe(true)
     expect(linked.canonical).toBe(path.join(home, ".ssh", "id_rsa"))
-    const inward = at(path.join(real, "elsewhere", "srclink", "x.ts"))
+    const inward = at(path.join(external, "srclink", "x.ts"))
     expect(inward.relation).toBe("external")
     expect(at("../../.ssh/missing/deeper").relation).toBe("home-sensitive")
     expect(at("../../.ssh/missing/deeper").exists).toBe(false)
@@ -137,5 +114,28 @@ describe("PathRisk classification", () => {
     expect(at("$DIR/build").relation).toBe("unknown")
     expect(at("`pwd`/x").relation).toBe("unknown")
     expect(PathRisk.classify("/etc", undefined, env).relation).toBe("system")
+  })
+
+  // The fixture's own roots. These are what the "external" scenarios above stand on: if the
+  // declared temp root ever swallowed the external directory again, external verdicts would
+  // quietly downgrade to temp (which ranks lower) instead of failing loudly here.
+  test("the fixture's declared temp root and external directory stay distinct", () => {
+    expect(at(path.join(temp, "scratch", "x")).relation).toBe("temp")
+    expect(at(temp).relation).toBe("external")
+    expect(at(path.join(external, "x")).relation).toBe("external")
+    expect(at(external).relation).toBe("external")
+    // Nothing external is inside the declared temp root, and nothing is inside the other roots.
+    for (const root of [temp, home, ws]) expect(path.relative(root, external).startsWith("..")).toBe(true)
+  })
+
+  // The fixture reclassifies its own roots; production must not follow it. A default environment
+  // still treats the OS temp dirs as temp, so moving the fixture did not relax real policy.
+  test("production defaults still treat the OS temp roots as temp", () => {
+    const production = PathRisk.env({ workspace: { directory: ws, worktree: ws } })
+    const classify = (input: string) => PathRisk.classify(input, ws, production).relation
+    expect(classify(path.join(os.tmpdir(), "scratch", "x"))).toBe("temp")
+    expect(classify(os.tmpdir())).toBe("external")
+    expect(classify("/tmp/scratch/x")).toBe("temp")
+    expect(classify("/tmp")).toBe("external")
   })
 })

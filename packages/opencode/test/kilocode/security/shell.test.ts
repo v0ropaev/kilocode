@@ -3,40 +3,20 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import fs from "fs/promises"
-import os from "os"
 import path from "path"
 import { Global } from "@opencode-ai/core/global"
 import { SecurityEngine } from "../../../src/kilocode/security/engine"
 import { PathRisk } from "../../../src/kilocode/security/path"
 import { ShellNormalizer } from "../../../src/kilocode/security/shell"
 import type { SecurityContext, SecurityDecision } from "../../../src/kilocode/security/types"
+import { classificationFixture } from "./fixture"
 
-const root = await fs.mkdtemp(path.join(os.tmpdir(), "kilo-security-"))
-const home = await fs.realpath(root).then((dir) => path.join(dir, "home"))
-const ws = path.join(home, "projects", "app")
-const outside = path.join(path.dirname(home), "outside")
-// The fixture home lives under the OS temp dir, so use an explicit temp root list.
-const env = PathRisk.env({
-  workspace: { directory: ws, worktree: ws },
-  home,
-  temp: ["/tmp", "/private/tmp", "/var/tmp"],
-  // macOS keeps the temp dir under /private/var, so keep the system list to roots the fixture never touches.
-  system: [
-    "/etc",
-    "/usr",
-    "/bin",
-    "/sbin",
-    "/System",
-    "/Library",
-    "/dev",
-    "/boot",
-    "/proc",
-    "/sys",
-    "/home",
-    "/Users",
-    "/opt",
-  ],
-})
+// The fixture declares its own home, temp root and external directory, so `outside` is genuinely
+// outside every declared root rather than inside the OS temp dir. See ./fixture.ts.
+const fixture = await classificationFixture("kilo-security-", ["projects", "app"])
+// `temp` is the declared temp root, used wherever a scenario means "scratch space"; `outside` is
+// outside every declared root, so the external scenarios below cannot decay into temp ones.
+const { home, ws, env, temp, external: outside } = fixture
 const ctx: SecurityContext = {
   sessionID: "ses_test",
   agent: "build",
@@ -53,7 +33,6 @@ beforeAll(async () => {
   await fs.mkdir(path.join(ws, "build"), { recursive: true })
   await fs.mkdir(path.join(ws, "certs"), { recursive: true })
   await fs.mkdir(path.join(ws, ".git"), { recursive: true })
-  await fs.mkdir(outside, { recursive: true })
   await fs.writeFile(path.join(home, ".ssh", "id_rsa"), "key")
   await fs.writeFile(path.join(home, ".ssh", "config"), "Host x")
   await fs.writeFile(path.join(home, ".aws", "credentials"), "secret")
@@ -68,7 +47,7 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  await fs.rm(root, { recursive: true, force: true })
+  await fixture.cleanup()
 })
 
 async function decide(command: string, opts?: { cwd?: string; shell?: string }): Promise<SecurityDecision> {
@@ -120,7 +99,7 @@ describe("low-friction defaults", () => {
     "find . -name '*.log' -exec rm -rf {} +",
     "cat .env.example",
     "cat ~/.zshrc",
-    "cd /tmp && rm -rf kilo-test-scratch",
+    `cd ${temp} && rm -rf kilo-test-scratch`,
     "(cd ~ && ls); rm -rf build",
     "kill 1234",
     "crontab -l",
@@ -251,7 +230,7 @@ describe("credential stores, shell persistence and Kilo state", () => {
       false,
     )
     expectDecision(await decide("npm install", { cwd: ws }), "allow")
-    expectDecision(await decide("npm install", { cwd: "/tmp" }), "allow")
+    expectDecision(await decide("npm install", { cwd: temp }), "allow")
   })
 
   test("workspace secrets and key material are a hard ask", async () => {
