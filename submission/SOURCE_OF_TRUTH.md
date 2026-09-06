@@ -479,13 +479,25 @@ cd packages/kilo-sandbox && bun test
 cd packages/opencode && bun run typecheck
 ```
 
-Проверено 2026-09-05 в текущем checkout:
+Перепроверено 2026-09-07 на Linux (Fedora, bun 1.4.2) в текущем checkout:
 
 | Проверка | Результат |
 |---|---|
-| `packages/opencode` security (21 файл) | **732 pass / 0 fail** |
-| `packages/kilo-sandbox` | **65 pass / 1 skip / 0 fail**, 351 expect() |
+| `packages/opencode` security (22 файла) | **754 pass / 1 fail** из 755 |
+| `packages/kilo-sandbox` | **51 pass / 15 skip / 0 fail**, 287 expect() |
+| `packages/opencode` typecheck | чисто |
 | Канонический прогон бенчмарка | 5760 runs, 0 errored, настоящая модель |
+
+Единственное падение — `extension.test.ts > the read boundary > host secrets, unrelated checkouts
+and symlink escapes are all unreadable`. Тест требует, чтобы домашний каталог был неперечислим,
+а на Linux песочница обязана протянуть цепочку каталогов до чекаута и интерпретатора, когда те
+лежат внутри `$HOME`, и расширение видит их имена. Содержимое при этом закрыто: `~/.ssh`,
+`~/.config/kilo/config.json`, `.env` и symlink-побеги — все `blocked`. Пятнадцать пропусков
+в `kilo-sandbox` — тесты профиля `seatbelt`, которые на Linux не выполняются по построению.
+
+Прогон 2026-09-05 на macOS давал 732 pass / 0 fail на 21 файле и `kilo-sandbox`
+65 pass / 1 skip / 0 fail, 351 expect(). После правок этой ветки на macOS он не повторялся:
+файлов стало 22, и число тестов там тоже будет 755.
 
 ## 11. Демонстрационные сценарии (детерминированные)
 
