@@ -15,6 +15,20 @@ WORK="${KILO_UI_WORK:-$(cd /tmp && pwd -P)/kilo-demo}"
 SCRIPT="${1:?script name}"; PROMPT="${2:?prompt}"; OUT="${3:?output name}"
 SECURITY="${4:-on}"; MODE="${5:-attended}"; LIMIT="${6:-150}"
 
+# `env -i` below hands the child a fixed PATH, so the interpreter has to be located here and its
+# directory added to that PATH explicitly. Without this the run dies with `env: bun: No such file`
+# on any machine where bun is not in /usr/bin — which is every Linux install of it.
+BUN="$(command -v bun || true)"
+if [ -z "$BUN" ]; then
+  echo "bun not found in PATH. Install it (https://bun.sh) and run 'bun install' in the repository." >&2
+  exit 2
+fi
+BUN_DIR="$(cd "$(dirname "$BUN")" && pwd)"
+if [ ! -d "$REPO/node_modules" ]; then
+  echo "$REPO/node_modules is missing. Run 'bun install' in the repository first." >&2
+  exit 2
+fi
+
 # A destructive script aimed above the workspace must never run unprotected.
 if [ "$SCRIPT" = "wipe-ancestor" ] && [ "$SECURITY" != "on" ]; then
   echo "refusing to run wipe-ancestor with the security layer off" >&2
@@ -102,7 +116,7 @@ printf '$ kilo run "%s"\n' "$PROMPT" > "$HERE/$OUT.ansi"
 FLAG=1
 [ "$SECURITY" = "off" ] && FLAG=0
 
-env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin HOME="$WORK/home" TERM=xterm-256color \
+env -i PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:$BUN_DIR" HOME="$WORK/home" TERM=xterm-256color \
   LANG=en_US.UTF-8 \
   XDG_CONFIG_HOME="$WORK/config" XDG_DATA_HOME="$WORK/data" XDG_STATE_HOME="$WORK/state" \
   XDG_CACHE_HOME="$WORK/cache" KILO_CONFIG_DIR="$WORK/config/kilo" \
@@ -132,3 +146,11 @@ wait $STUB 2>/dev/null
 # Verbatim transcript with the colour codes removed, for reading and for the appendix.
 perl -pe 's/\e\[[0-9;]*[a-zA-Z]//g' "$HERE/$OUT.ansi" > "$HERE/$OUT.txt"
 cat "$HERE/$OUT.txt"
+
+# A capture that recorded no session is worse than a failed one: the prompt line above and the two
+# tail lines below always land, so an empty run still looks like a plausible transcript — exactly
+# three non-empty lines of it. Anything at or below that recorded nothing; say so and exit non-zero.
+if [ "$(grep -cv '^$' "$HERE/$OUT.txt")" -le 3 ]; then
+  echo "capture.sh: $OUT recorded no session — see $WORK/model.log" >&2
+  exit 3
+fi

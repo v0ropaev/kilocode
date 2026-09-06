@@ -143,6 +143,13 @@ Bun.serve({
       )
     }
     if (system.startsWith("You rewrite one security notice")) {
+      // Only the injected-README capture gets a scripted sentence, and only because that sentence is
+      // true of that capture. Answering every notice with it made a stopped package install claim a
+      // README had asked for an upload — a wrong explanation shown to the user, which is worse than
+      // none. For every other script the stub declines: the rewrite fails its acceptance check and
+      // the product falls back to its own deterministic sentence, which is what actually ships when
+      // no model is configured. Capture with KILO_UI_CLASSIFIER_MODEL for a real model-written line.
+      if (SCRIPT !== "injected-readme") return replyOnce("")
       return replyOnce(
         "The project README told the agent to send this file to an outside address, which is not something you asked for.",
       )

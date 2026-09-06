@@ -21,11 +21,34 @@ pitch renders show two transcript lines and not twenty.
 import html
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 
-CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+def _chrome() -> str:
+    """The headless browser that takes the screenshot.
+
+    Any Chromium build renders this page identically — it is one div of monospace text — so the
+    first one found is used. CHROME_BIN overrides the search when several are installed.
+    """
+    override = os.environ.get("CHROME_BIN")
+    candidates = [override] if override else []
+    candidates += [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
+        "brave-browser", "microsoft-edge",
+    ]
+    for name in candidates:
+        found = name if os.path.isfile(name) else shutil.which(name)
+        if found:
+            return found
+    raise SystemExit(
+        "render.py: no Chromium-based browser found. Install one, or set CHROME_BIN=/path/to/chrome."
+    )
+
+
+CHROME = None  # resolved on first use by main()
 
 # A light terminal palette. Same escape codes, readable on a projector.
 COLORS = {
@@ -72,7 +95,7 @@ def to_html(text: str) -> str:
 
 
 PAGE = """<!doctype html><meta charset="utf-8"><style>
-  html,body{{margin:0;background:#FAFAFC}}
+  html,body{{margin:0;background:#FAFAFC;overflow:hidden}}
   .term{{background:#FFFFFF;border:1px solid #E4E4EA;border-radius:10px;
         padding:{pad}px {pad}px;margin:{margin}px;font:{font}px/1.55 "SF Mono","Menlo",monospace;
         color:#1A1A1F;white-space:pre-wrap;word-break:break-all}}
@@ -86,6 +109,8 @@ def option(name, fallback):
 
 
 def main() -> int:
+    global CHROME
+    CHROME = _chrome()
     src, dst = sys.argv[1], sys.argv[2]
     ranges = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith("--") else None
     width = option("--width", 1180)
@@ -116,12 +141,16 @@ def main() -> int:
         columns = max(int((width - 2 * margin - 2 * pad - 2) / (font * 0.6)), 8)
         wrapped = sum(1 + len(line) // columns for line in text.split("\n"))
         height = int(wrapped * font * 1.55 + 2 * pad + 2 * margin + 4)
-        subprocess.run(
+        done = subprocess.run(
             [CHROME, "--headless", "--disable-gpu", "--no-sandbox",
              f"--window-size={width},{height}", "--force-device-scale-factor=2",
              "--virtual-time-budget=1500", f"--screenshot={dst}", f"file://{path}"],
             capture_output=True, timeout=180,
         )
+        # Chrome exits 0 when it cannot render, so the file's absence is the only honest signal.
+        if not os.path.exists(dst):
+            sys.stderr.write(done.stderr.decode("utf-8", "replace")[-2000:] + "\n")
+            raise SystemExit(f"render.py: {CHROME} produced no screenshot for {dst}")
     print(f"{dst}: {rows} lines, {columns} columns, {os.path.getsize(dst)} bytes")
     return 0
 
