@@ -159,8 +159,12 @@ export namespace SecurityGate {
    * Provenance label for a tool *result* (§tool-result provenance). Audit only:
    * it records that the content in this result came from outside Kilo. No content is inspected,
    * rewritten or filtered, and nothing reads this label as policy today.
+   *
+   * Takes only the provenance, not the whole descriptor: a built-in tool can fetch content from
+   * somewhere else (the MCP resource tools do), and there the label belongs to the *content*'s origin
+   * rather than to the tool that went and got it.
    */
-  export function resultProvenance(descriptor: ToolDescriptor | undefined): string | undefined {
+  export function resultProvenance(descriptor: Pick<ToolDescriptor, "provenance"> | undefined): string | undefined {
     if (!descriptor) return undefined
     switch (descriptor.provenance) {
       case "builtin":
@@ -745,14 +749,12 @@ export namespace SecurityGate {
     const trusted = input.invocation === undefined || input.invocation.descriptor.provenance === "builtin"
     const settle = (committed: boolean, output?: string) =>
       Effect.sync(() => {
-        if (!input.options.layers?.egress || callID === undefined) return
-        if (!committed) return SecuritySessionState.discard(sessionID, callID)
-        const observed = input.options.layers.content
-          ? observeContent({ text: output, tool: input.tool, sessionID, callID })
-          : undefined
-        if (input.options.layers.classifier && output) {
+        if (callID === undefined) return
+        if (committed && input.options.layers?.classifier && output) {
           // Remember *what the agent was told*, not just what it obtained. Bounded, attributed, and
-          // recorded only on the success path — text from a refused call was never read.
+          // recorded only on the success path — text from a refused call was never read. This is the
+          // classifier's own input, so it is recorded whenever that layer is on: switching the
+          // stateful egress protection off narrows what is guarded, it does not blind the classifier.
           const attributed = ingestSource({
             tool: input.tool,
             provenance: input.invocation?.descriptor.provenance,
@@ -760,6 +762,11 @@ export namespace SecurityGate {
           })
           if (attributed) SecuritySessionState.recordIngested(sessionID, { ...attributed, excerpt: output })
         }
+        if (!input.options.layers?.egress) return
+        if (!committed) return SecuritySessionState.discard(sessionID, callID)
+        const observed = input.options.layers.content
+          ? observeContent({ text: output, tool: input.tool, sessionID, callID })
+          : undefined
         SecuritySessionState.commit(sessionID, callID, secretSource, observed)
       })
     // Tool-id shadowing: a workspace or plugin tool may call itself `read` or `list`. The envelope is
@@ -816,17 +823,18 @@ export namespace SecurityGate {
     const sessionID = input.ctx.sessionID
     const settle = (committed: boolean, output?: string) =>
       Effect.sync(() => {
-        if (!input.options.layers?.egress || callID === undefined) return
-        if (!committed) return SecuritySessionState.discard(sessionID, callID)
-        const observed = input.options.layers.content
-          ? observeContent({ text: output, tool: input.tool, sessionID, callID })
-          : undefined
-        if (input.options.layers.classifier && output) {
+        if (callID === undefined) return
+        if (committed && input.options.layers?.classifier && output) {
           // Remember *what the agent was told*, not just what it obtained. Bounded, attributed, and
           // recorded only on the success path — text from a refused call was never read.
           // A delegated result is untrusted by construction: it was produced outside Kilo.
           SecuritySessionState.recordIngested(sessionID, { source: "mcp", name: input.tool, excerpt: output })
         }
+        if (!input.options.layers?.egress) return
+        if (!committed) return SecuritySessionState.discard(sessionID, callID)
+        const observed = input.options.layers.content
+          ? observeContent({ text: output, tool: input.tool, sessionID, callID })
+          : undefined
         SecuritySessionState.commit(sessionID, callID, secretSource, observed)
       })
     return effect.pipe(
