@@ -16,7 +16,7 @@
 | Продуктовая ветка | `feat/security-auto-mode` |
 | HEAD продуктовой ветки | `d48d697ae7191cf4c9caa25aa2ad68dab2324736` |
 | Submission-ветка | `submission/security-auto` |
-| HEAD submission-ветки | `e9c5b0225591e4ebbd54b87178f04f4a08f2871c` |
+| HEAD submission-ветки | `e9c5b0225591e4ebbd54b87178f04f4a08f2871c` на момент извлечения; актуальный — `git rev-parse submission/security-auto` (после него шли только правки этой документации) |
 | Upstream merge-base | `f062b0737eb6969644ab3fea7b391b8049401e4a` (`origin/main`) |
 | `origin` | `https://github.com/Kilo-Org/kilocode.git` (upstream, только чтение) |
 | `fork` | `https://github.com/v0ropaev/kilocode.git` (публикация) |
