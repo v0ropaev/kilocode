@@ -381,6 +381,76 @@ describe("argument classification", () => {
 })
 
 // ------------------------------------------------------------------------------------------------
+// The spelling of a relative target must not change the decision
+// ------------------------------------------------------------------------------------------------
+
+describe("bare relative spellings of a sensitive configuration file", () => {
+  // A separator is what made a token a path, so "./kilo.json" was classified as project
+  // configuration while the bare "kilo.json" — the same file, and the spelling every tool that
+  // takes a filename actually uses — reached the classifier as prose and produced no evidence.
+  const declarations = ToolCapability.declarations({
+    config_writer: ["filesystem-write"],
+    docs_reader: ["readonly"],
+  })
+
+  const rulesFor = (file: string) =>
+    assess({ tool: "config_writer", provenance: "mcp-local", declarations, args: { file } })
+      .evidence.map((item) => item.rule)
+      .sort()
+
+  test("a bare, dotted and absolute spelling of kilo.json are classified alike", () => {
+    const bare = rulesFor("kilo.json")
+    expect(bare).toEqual(rulesFor("./kilo.json"))
+    expect(bare).toEqual(rulesFor(path.join(ws, "kilo.json")))
+    expect(bare).toContain("hard.workspace.config")
+  })
+
+  test("a bare kilo.json reaches the same hard ask as ./kilo.json", async () => {
+    for (const file of ["kilo.json", "./kilo.json"]) {
+      const decision = await decide({
+        tool: "config_writer",
+        provenance: "mcp-local",
+        declarations,
+        args: { file, content: "{}" },
+      })
+      expect(decision.action).toBe("ask")
+      expect(decision.hard).toBe(true)
+      expect(rules(decision)).toContain("hard.workspace.config")
+    }
+  })
+
+  test("the other sensitive configuration names carry over, case-insensitively for macOS and Windows", () => {
+    for (const file of ["kilo.jsonc", "opencode.json", "AGENTS.md", "Kilo.json", ".kilo", ".kilocode"]) {
+      expect(ToolAuthority.pathLike(file)).toBe(true)
+      expect(rulesFor(file)).toContain("hard.workspace.config")
+    }
+  })
+
+  test("a backslash spelling of the same file is classified alike on both platforms", () => {
+    expect(ToolAuthority.asPath(".\\kilo.json")).toBe(".\\kilo.json")
+    expect(ToolAuthority.asPath("kilo.json")).toBe("kilo.json")
+  })
+
+  // The negative half: recognising a bare name must not turn every single-token argument into a
+  // path. Tool, package and option names are the arguments unvetted tools carry most often.
+  test("tool and package names are not promoted to filesystem paths", () => {
+    for (const value of ["eslint", "typescript", "readme.md", "build", "test.ts", "kilo", "config.json"]) {
+      expect(ToolAuthority.asPath(value)).toBeUndefined()
+    }
+  })
+
+  test("an ordinary single-token argument produces no evidence of its own", () => {
+    const result = assess({
+      tool: "docs_reader",
+      provenance: "mcp-local",
+      declarations,
+      args: { linter: "eslint", language: "typescript", pkg: "@scope/package" },
+    })
+    expect(result.evidence.filter((item) => item.source === "hard")).toEqual([])
+  })
+})
+
+// ------------------------------------------------------------------------------------------------
 // Composition with the session secret state
 // ------------------------------------------------------------------------------------------------
 

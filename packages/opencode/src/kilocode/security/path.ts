@@ -310,8 +310,11 @@ export namespace PathRisk {
    * Project configuration Kilo (or the tooling it reads) loads from any directory between the session
    * directory and the worktree root. Matched case-insensitively because macOS and Windows filesystems
    * are, so `.KILO/agents/x.md` lands in `.kilo/`.
+   *
+   * Exported so a caller that must decide whether a bare, separator-less token names project
+   * configuration (`kilo.json`) asks this classifier instead of keeping a second copy of the list.
    */
-  function projectConfig(rel: string) {
+  export function projectConfig(rel: string) {
     const parts = rel.split("/").filter((part) => part.length > 0)
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i]!.toLowerCase()

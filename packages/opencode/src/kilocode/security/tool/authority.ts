@@ -78,6 +78,12 @@ export namespace ToolAuthority {
    * whitespace, or a `file://` URI (which is a path wearing a URL's clothes — excluding it would let
    * `file:///home/u/.ssh/id_rsa` slip past the same rules that stop the bare path). Prose and remote
    * URLs are not paths, so an ordinary text argument is never classified as one.
+   *
+   * One separator-less shape still has to be a path: a sensitive Kilo configuration name written the
+   * way a tool that takes a filename actually takes it. `kilo.json` and `./kilo.json` are the same
+   * file, so recognising only the second let a tool reach the project configuration through the
+   * weaker spelling. The exception is exactly the classifier's own list of project-configuration
+   * names — no wider heuristic — so `eslint` or `typescript` stays prose.
    */
   export function asPath(value: string): string | undefined {
     if (value.length === 0 || value.length > 4096) return undefined
@@ -92,7 +98,8 @@ export namespace ToolAuthority {
     if (value.includes("://")) return undefined
     if (/^(?:\/|~[\\/]|\.{1,2}[\\/]|[A-Za-z]:[\\/])/.test(value)) return value
     if (/\s/.test(value)) return undefined
-    return /[\\/]/.test(value) ? value : undefined
+    if (/[\\/]/.test(value)) return value
+    return PathRisk.projectConfig(value) ? value : undefined
   }
 
   /** Convenience predicate over {@link asPath}. */
