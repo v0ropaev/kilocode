@@ -192,19 +192,27 @@ def report():
 
 
 def set_bg(slide, hexcolor):
+    """Paint the slide background.
+
+    `<p:bg>` has to be the FIRST CHILD OF `<p:cSld>`. Hung anywhere else it is schema-invalid, and
+    the renderers disagree about what to do with that: LibreOffice paints it anyway, PowerPoint and
+    Keynote drop it silently. The blue slides carry white text, so a dropped fill turns them into
+    blank white pages — and checking the PDF, which LibreOffice produces, cannot catch it. `main()`
+    asserts the placement for exactly that reason."""
     from lxml import etree
 
     ns = "http://schemas.openxmlformats.org/drawingml/2006/main"
     pns = "http://schemas.openxmlformats.org/presentationml/2006/main"
-    for old in slide._element.findall(f"{{{pns}}}bg"):
-        slide._element.remove(old)
-    bg = etree.SubElement(slide._element, f"{{{pns}}}bg")
+    csld = slide._element.find(f"{{{pns}}}cSld")
+    for old in list(slide._element.findall(f"{{{pns}}}bg")) + list(csld.findall(f"{{{pns}}}bg")):
+        old.getparent().remove(old)
+    bg = etree.Element(f"{{{pns}}}bg")
     bgpr = etree.SubElement(bg, f"{{{pns}}}bgPr")
     fill = etree.SubElement(bgpr, f"{{{ns}}}solidFill")
     clr = etree.SubElement(fill, f"{{{ns}}}srgbClr")
     clr.set("val", hexcolor)
     etree.SubElement(bgpr, f"{{{ns}}}effectLst")
-    slide._element.insert(1, bg)
+    csld.insert(0, bg)
 
 
 def tb(slide, x, y, w, h, anchor=MSO_ANCHOR.TOP):
@@ -994,6 +1002,32 @@ def scrub(path, slides):
     os.replace(tmp, path)
 
 
+def verify_backgrounds(path):
+    """Fail the build if a painted background would not survive PowerPoint.
+
+    Checked on the saved package rather than in memory, because that is the artefact that ships, and
+    because the failure this catches is silent everywhere else: an out-of-place `<p:bg>` renders fine
+    through LibreOffice and disappears in PowerPoint, leaving white text on a white page."""
+    import zipfile
+    from lxml import etree
+
+    pns = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+    bad = []
+    with zipfile.ZipFile(path) as zf:
+        for name in sorted(n for n in zf.namelist() if n.startswith("ppt/slides/slide")):
+            root = etree.fromstring(zf.read(name))
+            stray = root.findall(f"{pns}bg")
+            csld = root.find(f"{pns}cSld")
+            inside = csld.findall(f"{pns}bg") if csld is not None else []
+            if stray:
+                bad.append(f"{name}: <p:bg> is a sibling of <p:cSld>, not inside it")
+            elif inside and list(csld).index(inside[0]) != 0:
+                bad.append(f"{name}: <p:bg> is not the first child of <p:cSld>")
+    if bad:
+        raise SystemExit("background will not render in PowerPoint:\n  " + "\n  ".join(bad))
+    return sum(1 for _ in [b for b in bad]) == 0
+
+
 def main():
     preflight()
     shutil.copyfile(TEMPLATE, OUT)
@@ -1017,6 +1051,7 @@ def main():
     n = len(prs.slides._sldIdLst)
     prs.save(OUT)
     scrub(OUT, n)
+    verify_backgrounds(OUT)
     print(f"wrote {OUT} - {n} slides")
     sys.exit(1 if report() else 0)
 
