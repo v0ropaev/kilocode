@@ -108,7 +108,12 @@ export namespace ExtensionHost {
    */
   const SYSTEM_READ: Record<string, string[]> = {
     darwin: ["/usr", "/bin", "/sbin", "/System", "/Library", "/opt", "/dev", "/private/var/db", "/private/var/select"],
-    linux: ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/dev", "/proc", "/sys"],
+    // `/proc` and `/sys` are deliberately absent. The Linux backend already gives the child a fresh
+    // private `/proc` of its own, so binding the host's added nothing an extension could use — while
+    // costing a recursive deny-name walk over every process on the machine, and then failing outright
+    // because a tmpfs cannot be mounted over `/proc/<pid>/ns`. Nothing an extension legitimately
+    // reads lives in either tree.
+    linux: ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/dev"],
   }
 
   /**
@@ -139,9 +144,21 @@ export namespace ExtensionHost {
     }
   }
 
+  /**
+   * One allowed subtree, named by both spellings when the platform has two.
+   *
+   * The canonical path is what actually gets bound, but the original has to be bound as well when
+   * it differs: on a usr-merged Linux `/lib64` is a symlink to `/usr/lib64`, and binding only the
+   * target leaves no `/lib64` inside the sandbox root — so the dynamic loader the interpreter names
+   * (`/lib64/ld-linux-x86-64.so.2`) is not there and the child dies with a bare `execvp: No such
+   * file or directory`. Both spellings resolve to the same directory, so naming both adds no reach.
+   */
   function subtree(target: string | undefined) {
     const resolved = target ? canonical(target) : undefined
-    return resolved ? [{ path: resolved, kind: "subtree" as const }] : []
+    if (!resolved) return []
+    const out = [{ path: resolved, kind: "subtree" as const }]
+    if (target && target !== resolved && existsSync(target)) out.push({ path: target, kind: "subtree" as const })
+    return out
   }
 
   export interface ProfileInput {
