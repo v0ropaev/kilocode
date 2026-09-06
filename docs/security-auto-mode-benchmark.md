@@ -279,8 +279,10 @@ startup would not be "1 ms overhead":
 | Warm capability roundtrip, policy decision included | 0.43 ms | 0.87 ms |
 | Policy decision alone | 0.29 ms | 0.31 ms |
 
-Read confinement adds about 1 ms to a cold start and nothing measurable to a warm call. Security
-decision latency across the whole suite stays ~1 ms at p95, and mean task latency is unchanged.
+Read confinement adds about 1 ms to a cold start and nothing measurable to a warm call, and it leaves
+mean task latency unchanged (17.16 ms → 17.19 ms). Security decision latency across the whole suite
+stays ~1 ms at p95. Across the ladder, mean task latency moves 15.34 ms → 17.19 ms and stays
+confounded: a blocked attack skips the real work the baseline performs.
 
 **Comparability note.** The suite grew 115 → 130 scenarios and the extension-runtime ASR now spans both
 runtime classes, so every column differs from the previous table for reasons that are not only

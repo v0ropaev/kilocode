@@ -105,15 +105,20 @@ function code(cause: unknown) {
 }
 
 // Lists one directory during the deny-name scan. A directory that vanished mid-scan
-// (ENOENT/ENOTDIR) is treated as empty, and an unreadable directory (EACCES/EPERM)
-// yields undefined so the caller can protect it instead of failing the whole scan.
+// (ENOENT/ENOTDIR) is treated as empty, and one that cannot be enumerated yields undefined so the
+// caller can protect it instead of failing the whole scan.
+//
+// EINVAL belongs in that second group, and on Linux it is not a corner case: the allowed-read set
+// names `/proc`, and `scandir` on a `/proc/<pid>/net` entry returns EINVAL. Letting it through
+// aborted the scan, so no profile could be built and the extension host refused to start at all —
+// on every Linux machine, while macOS never saw it.
 function list(dir: string) {
   try {
     return readdirSync(dir, { withFileTypes: true })
   } catch (cause) {
     const tag = code(cause)
     if (tag === "ENOENT" || tag === "ENOTDIR") return []
-    if (tag === "EACCES" || tag === "EPERM") return undefined
+    if (tag === "EACCES" || tag === "EPERM" || tag === "EINVAL") return undefined
     throw cause
   }
 }

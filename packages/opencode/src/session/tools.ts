@@ -33,6 +33,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { SecurityGate } from "@/kilocode/security/gate"
 import { SecurityKeys } from "@/kilocode/security/keys"
 import { ToolOrigin } from "@/kilocode/security/tool/origin"
+import * as ToolNetwork from "@/kilocode/sandbox/network"
 import type { SecurityDeniedError } from "@/kilocode/security/error"
 import { SecuritySessionState } from "@/kilocode/security/state/store" // kilocode_change
 import { KiloSession } from "@/kilocode/session" // kilocode_change
@@ -137,6 +138,70 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       mcp: { server: entry.clientName, tool: entry.def.name, remote: ToolOrigin.mcpProvenance(entry) === "mcp-remote" },
       hints: { readOnly: hint("readOnlyHint"), destructive: hint("destructiveHint"), openWorld: hint("openWorldHint") },
     })
+  }
+
+  /**
+   * One lifecycle for the three MCP resource tools.
+   *
+   * They are Kilo built-ins, but the text they hand the agent is written outside Kilo, and they ask
+   * for permission themselves — which is exactly the shape of a delegated MCP call. What they were
+   * missing is the rest of that lifecycle: settling the session state on the text the agent actually
+   * received (so a resource's words are part of the semantic context the *next* side-effecting action
+   * is judged against), and turning a security denial into a structured result instead of a defect
+   * that ends the turn.
+   *
+   * `SecurityGate.delegate` is that lifecycle, unchanged and shared with the MCP tool path below. The
+   * built-in `SecurityGate.execute` envelope cannot stand in for it, and for one reason rather than
+   * two: its ingest attribution reads the *tool's* provenance, which for a Kilo built-in is
+   * `builtin`, so the resource text would still never be recorded. (It would *not* add a second
+   * permission ask — all three are in `ToolCapability.ASKING`, and `execute` skips the envelope for
+   * those. That reason was stated here and was wrong.) Nothing here widens a permission: the ask,
+   * its patterns and its metadata are untouched.
+   */
+  const resourceCall = <A extends { output: string }, E, R>(
+    ctx: Tool.Context,
+    name: string,
+    /**
+     * The part of the result the *server* wrote, or nothing when it returned no content. Kilo's own
+     * "returned no contents" sentence is not untrusted text, and recording it would put a session
+     * that read nothing into the semantic layer's routing for the rest of its life.
+     */
+    ingest: (value: A) => string | undefined,
+    effect: Effect.Effect<A, E, R>,
+  ) => {
+    const denied = (error: SecurityDeniedError) => {
+      const result = error.result(name)
+      // No attachments on a denial: the read never happened.
+      return { title: result.title, metadata: result.metadata, output: result.output, attachments: undefined }
+    }
+    return SecurityGate.delegate<A | ReturnType<typeof denied>, E, R>(
+      // `output` is called on the success path only, so the denial shape never reaches `ingest`.
+      { ctx, tool: name, options: security, output: (value) => ingest(value as A) },
+      denied,
+      effect,
+    )
+  }
+
+  /**
+   * Provenance of the *content* a resource tool fetched. The tool is Kilo's; the words are the
+   * server's, so the label follows the server — the same vocabulary the delegated MCP path uses, and
+   * only where that path would have one (absent when the mode or the tool layer is off).
+   */
+  const resourceProvenance = (invocation: SecurityGate.Request["security"], servers: string[]) => {
+    if (!invocation) return undefined
+    // The live tool entry is the authority: `MCP.tools()` stamps the remote marker the delegated
+    // path already judges by, and it covers servers registered at runtime, which the configuration
+    // snapshot does not. The configuration is the fallback for a server that publishes resources but
+    // no tools, where there is no entry to read; a runtime-added server of that shape is the one
+    // remaining case that reads as local. The field is an audit label, never an input to a decision.
+    const marked = (name: string) =>
+      Object.entries(mcpTools).some(([key, entry]) => key.startsWith(`${name}_`) && ToolNetwork.isRemoteMcp(entry))
+    const configured = (name: string) => {
+      const entry = cfg.mcp?.[name]
+      return entry !== undefined && "type" in entry && entry.type === "remote"
+    }
+    const remote = servers.some((name) => marked(name) || configured(name))
+    return SecurityGate.resultProvenance({ provenance: remote ? "mcp-remote" : "mcp-local" })
   }
   // kilocode_change end
 
@@ -312,68 +377,76 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         return run.promise(
           Effect.gen(function* () {
             const parsed = parseListMcpResourcesArgs(args)
-            // kilocode_change - identity of the delegated listing for the security decision
             // kilocode_change start - identity of the delegated listing for the security decision
-            const ctx = context(
-              toRecord(args),
-              opts,
-              SecurityGate.describe({
-                tool: MCP_RESOURCE_TOOLS.list,
-                provenance: "builtin",
-                args,
-                options: security,
-                ...(parsed.server ? { mcp: { server: parsed.server, tool: MCP_RESOURCE_TOOLS.list } } : {}),
-              }),
-            )
-            // kilocode_change end
-            const clients = yield* mcp.clients()
-            const resourceServers = Object.entries(clients)
-              .filter((entry) => !!entry[1].getServerCapabilities()?.resources)
-              .map((entry) => entry[0])
-              .sort((a, b) => a.localeCompare(b))
-            if (parsed.server && !resourceServers.includes(parsed.server)) {
-              throw new Error(
-                resourceServers.length === 0
-                  ? `MCP server "${parsed.server}" does not support resources`
-                  : `MCP server "${parsed.server}" does not support resources. Available resource servers: ${resourceServers.join(", ")}`,
-              )
-            }
-            const permissionPatterns = parsed.server
-              ? [`mcp:${parsed.server}:*`]
-              : resourceServers.map((server) => `mcp:${server}:*`)
-            yield* plugin.trigger(
-              "tool.execute.before",
-              { tool: MCP_RESOURCE_TOOLS.list, sessionID: ctx.sessionID, callID: opts.toolCallId },
-              { args },
-            )
-            yield* ctx.ask({
-              permission: "read",
-              metadata: parsed.server ? { server: parsed.server } : {},
-              patterns: permissionPatterns,
-              always: permissionPatterns,
+            const invocation = SecurityGate.describe({
+              tool: MCP_RESOURCE_TOOLS.list,
+              provenance: "builtin",
+              args,
+              options: security,
+              ...(parsed.server ? { mcp: { server: parsed.server, tool: MCP_RESOURCE_TOOLS.list } } : {}),
             })
+            const ctx = context(toRecord(args), opts, invocation)
+            // kilocode_change end
+            // kilocode_change start - the settlement lifecycle a delegated MCP tool already gets
+            const output = yield* resourceCall(
+              ctx,
+              MCP_RESOURCE_TOOLS.list,
+              (value) => (value.metadata.count > 0 ? value.output : undefined),
+              Effect.gen(function* () {
+                // kilocode_change end
+                const clients = yield* mcp.clients()
+                const resourceServers = Object.entries(clients)
+                  .filter((entry) => !!entry[1].getServerCapabilities()?.resources)
+                  .map((entry) => entry[0])
+                  .sort((a, b) => a.localeCompare(b))
+                if (parsed.server && !resourceServers.includes(parsed.server)) {
+                  throw new Error(
+                    resourceServers.length === 0
+                      ? `MCP server "${parsed.server}" does not support resources`
+                      : `MCP server "${parsed.server}" does not support resources. Available resource servers: ${resourceServers.join(", ")}`,
+                  )
+                }
+                const permissionPatterns = parsed.server
+                  ? [`mcp:${parsed.server}:*`]
+                  : resourceServers.map((server) => `mcp:${server}:*`)
+                yield* plugin.trigger(
+                  "tool.execute.before",
+                  { tool: MCP_RESOURCE_TOOLS.list, sessionID: ctx.sessionID, callID: opts.toolCallId },
+                  { args },
+                )
+                yield* ctx.ask({
+                  permission: "read",
+                  metadata: parsed.server ? { server: parsed.server } : {},
+                  patterns: permissionPatterns,
+                  always: permissionPatterns,
+                })
 
-            const resources = Object.values(yield* mcp.resources(parsed.server))
-            const filtered = resources
-              .filter((resource) => !parsed.server || resource.client === parsed.server)
-              .toSorted((a, b) =>
-                (a.client + "\u0000" + a.name + "\u0000" + a.uri).localeCompare(
-                  b.client + "\u0000" + b.name + "\u0000" + b.uri,
-                ),
-              )
-            const content = JSON.stringify({ resources: filtered.map(formatMcpResource) }, null, 2)
-            const truncated = yield* truncate.output(content, {}, input.agent)
-            const output = {
-              title: parsed.server ? `MCP resources: ${parsed.server}` : "MCP resources",
-              metadata: {
-                count: filtered.length,
-                servers: resourceServers,
-                ...(parsed.server ? { server: parsed.server } : {}),
-                truncated: truncated.truncated,
-                ...(truncated.truncated && { outputPath: truncated.outputPath }),
-              },
-              output: truncated.content,
-            }
+                const resources = Object.values(yield* mcp.resources(parsed.server))
+                const filtered = resources
+                  .filter((resource) => !parsed.server || resource.client === parsed.server)
+                  .toSorted((a, b) =>
+                    (a.client + "\u0000" + a.name + "\u0000" + a.uri).localeCompare(
+                      b.client + "\u0000" + b.name + "\u0000" + b.uri,
+                    ),
+                  )
+                const content = JSON.stringify({ resources: filtered.map(formatMcpResource) }, null, 2)
+                const truncated = yield* truncate.output(content, {}, input.agent)
+                // kilocode_change - the listing is the server's words, not Kilo's
+                const provenance = resourceProvenance(invocation, parsed.server ? [parsed.server] : resourceServers)
+                return {
+                  title: parsed.server ? `MCP resources: ${parsed.server}` : "MCP resources",
+                  metadata: {
+                    count: filtered.length,
+                    servers: resourceServers,
+                    ...(parsed.server ? { server: parsed.server } : {}),
+                    truncated: truncated.truncated,
+                    ...(truncated.truncated && { outputPath: truncated.outputPath }),
+                    ...(provenance ? { [SecurityKeys.PROVENANCE]: provenance } : {}), // kilocode_change
+                  },
+                  output: truncated.content,
+                }
+              }),
+            ) // kilocode_change - end of the delegated-resource lifecycle wrapper
             yield* plugin.trigger(
               "tool.execute.after",
               { tool: MCP_RESOURCE_TOOLS.list, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
@@ -405,68 +478,76 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         return run.promise(
           Effect.gen(function* () {
             const parsed = parseListMcpResourcesArgs(args)
-            // kilocode_change - identity of the delegated listing for the security decision
             // kilocode_change start - identity of the delegated listing for the security decision
-            const ctx = context(
-              toRecord(args),
-              opts,
-              SecurityGate.describe({
-                tool: MCP_RESOURCE_TOOLS.listTemplates,
-                provenance: "builtin",
-                args,
-                options: security,
-                ...(parsed.server ? { mcp: { server: parsed.server, tool: MCP_RESOURCE_TOOLS.listTemplates } } : {}),
-              }),
-            )
-            // kilocode_change end
-            const clients = yield* mcp.clients()
-            const resourceServers = Object.entries(clients)
-              .filter((entry) => !!entry[1].getServerCapabilities()?.resources)
-              .map((entry) => entry[0])
-              .sort((a, b) => a.localeCompare(b))
-            if (parsed.server && !resourceServers.includes(parsed.server)) {
-              throw new Error(
-                resourceServers.length === 0
-                  ? `MCP server "${parsed.server}" does not support resources`
-                  : `MCP server "${parsed.server}" does not support resources. Available resource servers: ${resourceServers.join(", ")}`,
-              )
-            }
-            const permissionPatterns = parsed.server
-              ? [`mcp:${parsed.server}:*`]
-              : resourceServers.map((server) => `mcp:${server}:*`)
-            yield* plugin.trigger(
-              "tool.execute.before",
-              { tool: MCP_RESOURCE_TOOLS.listTemplates, sessionID: ctx.sessionID, callID: opts.toolCallId },
-              { args },
-            )
-            yield* ctx.ask({
-              permission: "read",
-              metadata: parsed.server ? { server: parsed.server } : {},
-              patterns: permissionPatterns,
-              always: permissionPatterns,
+            const invocation = SecurityGate.describe({
+              tool: MCP_RESOURCE_TOOLS.listTemplates,
+              provenance: "builtin",
+              args,
+              options: security,
+              ...(parsed.server ? { mcp: { server: parsed.server, tool: MCP_RESOURCE_TOOLS.listTemplates } } : {}),
             })
+            const ctx = context(toRecord(args), opts, invocation)
+            // kilocode_change end
+            // kilocode_change start - the settlement lifecycle a delegated MCP tool already gets
+            const output = yield* resourceCall(
+              ctx,
+              MCP_RESOURCE_TOOLS.listTemplates,
+              (value) => (value.metadata.count > 0 ? value.output : undefined),
+              Effect.gen(function* () {
+                // kilocode_change end
+                const clients = yield* mcp.clients()
+                const resourceServers = Object.entries(clients)
+                  .filter((entry) => !!entry[1].getServerCapabilities()?.resources)
+                  .map((entry) => entry[0])
+                  .sort((a, b) => a.localeCompare(b))
+                if (parsed.server && !resourceServers.includes(parsed.server)) {
+                  throw new Error(
+                    resourceServers.length === 0
+                      ? `MCP server "${parsed.server}" does not support resources`
+                      : `MCP server "${parsed.server}" does not support resources. Available resource servers: ${resourceServers.join(", ")}`,
+                  )
+                }
+                const permissionPatterns = parsed.server
+                  ? [`mcp:${parsed.server}:*`]
+                  : resourceServers.map((server) => `mcp:${server}:*`)
+                yield* plugin.trigger(
+                  "tool.execute.before",
+                  { tool: MCP_RESOURCE_TOOLS.listTemplates, sessionID: ctx.sessionID, callID: opts.toolCallId },
+                  { args },
+                )
+                yield* ctx.ask({
+                  permission: "read",
+                  metadata: parsed.server ? { server: parsed.server } : {},
+                  patterns: permissionPatterns,
+                  always: permissionPatterns,
+                })
 
-            const templates = Object.values(yield* mcp.resourceTemplates(parsed.server))
-            const filtered = templates
-              .filter((template) => !parsed.server || template.client === parsed.server)
-              .toSorted((a, b) =>
-                (a.client + "\u0000" + a.name + "\u0000" + a.uriTemplate).localeCompare(
-                  b.client + "\u0000" + b.name + "\u0000" + b.uriTemplate,
-                ),
-              )
-            const content = JSON.stringify({ resourceTemplates: filtered.map(formatMcpResourceTemplate) }, null, 2)
-            const truncated = yield* truncate.output(content, {}, input.agent)
-            const output = {
-              title: parsed.server ? `MCP resource templates: ${parsed.server}` : "MCP resource templates",
-              metadata: {
-                count: filtered.length,
-                servers: resourceServers,
-                ...(parsed.server ? { server: parsed.server } : {}),
-                truncated: truncated.truncated,
-                ...(truncated.truncated && { outputPath: truncated.outputPath }),
-              },
-              output: truncated.content,
-            }
+                const templates = Object.values(yield* mcp.resourceTemplates(parsed.server))
+                const filtered = templates
+                  .filter((template) => !parsed.server || template.client === parsed.server)
+                  .toSorted((a, b) =>
+                    (a.client + "\u0000" + a.name + "\u0000" + a.uriTemplate).localeCompare(
+                      b.client + "\u0000" + b.name + "\u0000" + b.uriTemplate,
+                    ),
+                  )
+                const content = JSON.stringify({ resourceTemplates: filtered.map(formatMcpResourceTemplate) }, null, 2)
+                const truncated = yield* truncate.output(content, {}, input.agent)
+                // kilocode_change - the listing is the server's words, not Kilo's
+                const provenance = resourceProvenance(invocation, parsed.server ? [parsed.server] : resourceServers)
+                return {
+                  title: parsed.server ? `MCP resource templates: ${parsed.server}` : "MCP resource templates",
+                  metadata: {
+                    count: filtered.length,
+                    servers: resourceServers,
+                    ...(parsed.server ? { server: parsed.server } : {}),
+                    truncated: truncated.truncated,
+                    ...(truncated.truncated && { outputPath: truncated.outputPath }),
+                    ...(provenance ? { [SecurityKeys.PROVENANCE]: provenance } : {}), // kilocode_change
+                  },
+                  output: truncated.content,
+                }
+              }),
+            ) // kilocode_change - end of the delegated-resource lifecycle wrapper
             yield* plugin.trigger(
               "tool.execute.after",
               { tool: MCP_RESOURCE_TOOLS.listTemplates, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
@@ -502,63 +583,71 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         return run.promise(
           Effect.gen(function* () {
             const parsed = parseReadMcpResourceArgs(args)
-            // kilocode_change - server + resource URI reach the security decision, not just "read"
             // kilocode_change start - server + resource URI reach the security decision, not just "read"
-            const ctx = context(
-              toRecord(args),
-              opts,
-              SecurityGate.describe({
-                tool: MCP_RESOURCE_TOOLS.read,
-                provenance: "builtin",
-                args,
-                options: security,
-                mcp: { server: parsed.server, tool: MCP_RESOURCE_TOOLS.read, resource: parsed.uri },
-              }),
-            )
-            // kilocode_change end
-            const clients = yield* mcp.clients()
-            const client = clients[parsed.server]
-            if (!client) {
-              throw new Error(`MCP server "${parsed.server}" is not connected`)
-            }
-            if (!client.getServerCapabilities()?.resources) {
-              throw new Error(`MCP server "${parsed.server}" does not support resources`)
-            }
-            yield* plugin.trigger(
-              "tool.execute.before",
-              { tool: MCP_RESOURCE_TOOLS.read, sessionID: ctx.sessionID, callID: opts.toolCallId },
-              { args },
-            )
-            yield* ctx.ask({
-              permission: "read",
-              metadata: { server: parsed.server, uri: parsed.uri },
-              patterns: [`mcp:${parsed.server}:${parsed.uri}`],
-              always: [`mcp:${parsed.server}:*`],
+            const invocation = SecurityGate.describe({
+              tool: MCP_RESOURCE_TOOLS.read,
+              provenance: "builtin",
+              args,
+              options: security,
+              mcp: { server: parsed.server, tool: MCP_RESOURCE_TOOLS.read, resource: parsed.uri },
             })
+            const ctx = context(toRecord(args), opts, invocation)
+            // kilocode_change end
+            // kilocode_change start - the settlement lifecycle a delegated MCP tool already gets
+            const output = yield* resourceCall(
+              ctx,
+              MCP_RESOURCE_TOOLS.read,
+              (value) => (value.metadata.contents > 0 ? value.output : undefined),
+              Effect.gen(function* () {
+                // kilocode_change end
+                const clients = yield* mcp.clients()
+                const client = clients[parsed.server]
+                if (!client) {
+                  throw new Error(`MCP server "${parsed.server}" is not connected`)
+                }
+                if (!client.getServerCapabilities()?.resources) {
+                  throw new Error(`MCP server "${parsed.server}" does not support resources`)
+                }
+                yield* plugin.trigger(
+                  "tool.execute.before",
+                  { tool: MCP_RESOURCE_TOOLS.read, sessionID: ctx.sessionID, callID: opts.toolCallId },
+                  { args },
+                )
+                yield* ctx.ask({
+                  permission: "read",
+                  metadata: { server: parsed.server, uri: parsed.uri },
+                  patterns: [`mcp:${parsed.server}:${parsed.uri}`],
+                  always: [`mcp:${parsed.server}:*`],
+                })
 
-            const content = yield* mcp.readResource(parsed.server, parsed.uri)
-            if (!content) throw new Error(`Failed to read MCP resource: ${parsed.server}/${parsed.uri}`)
+                const content = yield* mcp.readResource(parsed.server, parsed.uri)
+                if (!content) throw new Error(`Failed to read MCP resource: ${parsed.server}/${parsed.uri}`)
 
-            const formatted = formatMcpResourceContent(parsed.server, parsed.uri, content)
-            const truncated = yield* truncate.output(formatted.text, {}, input.agent)
-            const output = {
-              title: `MCP resource: ${parsed.uri}`,
-              metadata: {
-                server: parsed.server,
-                uri: parsed.uri,
-                contents: formatted.contents,
-                attachments: formatted.attachments.length,
-                truncated: truncated.truncated,
-                ...(truncated.truncated && { outputPath: truncated.outputPath }),
-              },
-              output: truncated.content,
-              attachments: formatted.attachments.map((attachment) => ({
-                ...attachment,
-                id: PartID.ascending(),
-                sessionID: ctx.sessionID,
-                messageID: input.processor.message.id,
-              })),
-            }
+                const formatted = formatMcpResourceContent(parsed.server, parsed.uri, content)
+                const truncated = yield* truncate.output(formatted.text, {}, input.agent)
+                // kilocode_change - the resource text is the server's words, not Kilo's
+                const provenance = resourceProvenance(invocation, [parsed.server])
+                return {
+                  title: `MCP resource: ${parsed.uri}`,
+                  metadata: {
+                    server: parsed.server,
+                    uri: parsed.uri,
+                    contents: formatted.contents,
+                    attachments: formatted.attachments.length,
+                    truncated: truncated.truncated,
+                    ...(truncated.truncated && { outputPath: truncated.outputPath }),
+                    ...(provenance ? { [SecurityKeys.PROVENANCE]: provenance } : {}), // kilocode_change
+                  },
+                  output: truncated.content,
+                  attachments: formatted.attachments.map((attachment) => ({
+                    ...attachment,
+                    id: PartID.ascending(),
+                    sessionID: ctx.sessionID,
+                    messageID: input.processor.message.id,
+                  })),
+                }
+              }),
+            ) // kilocode_change - end of the delegated-resource lifecycle wrapper
             yield* plugin.trigger(
               "tool.execute.after",
               { tool: MCP_RESOURCE_TOOLS.read, sessionID: ctx.sessionID, callID: opts.toolCallId, args },

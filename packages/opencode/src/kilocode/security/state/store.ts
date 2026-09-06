@@ -249,6 +249,17 @@ export namespace SecuritySessionState {
     if (excerpt.trim().length === 0) return
     const now = Date.now()
     const state = open(sessionID, now)
+    // The window holds *distinct* things the agent was told, and the newest reading of each. Reading
+    // one source again replaces its earlier entry rather than pushing a second one — the later text
+    // is what the agent now has, and the earlier is stale.
+    //
+    // This is what keeps the window expensive to flush. It is eight entries deep and evicts oldest
+    // first, so without deduplication anything the agent can call repeatedly and cheaply — an
+    // argument-free MCP resource listing, the same file read in a loop — pushes older excerpts out
+    // and can empty the semantic layer's view of what it read. With it, repetition costs one slot
+    // however often it happens, and evicting a real excerpt takes eight *different* sources.
+    const seen = state.ingested.findIndex((entry) => entry.source === item.source && entry.name === item.name)
+    if (seen >= 0) state.ingested.splice(seen, 1)
     state.ingested.push({ ...item, excerpt, at: now })
     if (state.ingested.length > MAX_INGESTED) state.ingested.splice(0, state.ingested.length - MAX_INGESTED)
     touch(state, now)

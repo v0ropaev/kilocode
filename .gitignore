@@ -76,3 +76,9 @@ packages/*/.kilo/tui.jsonc
 # Test Artifacts
 packages/app/.artifacts/
 packages/opencode/.artifacts/
+
+# PowerPoint/Keynote lock files, created while a deck is open
+~$*
+
+# Per-capture logs written by submission/evidence/ui/capture-all.sh
+submission/evidence/ui/.capture-*.log
