@@ -251,18 +251,23 @@ cd packages/opencode && bun run script/security-bench.ts --runs 1 --scenario <id
    bun run script/security-bench.ts --runs 1 --scenario atk-workspace-wipe \
      --configs baseline,read-confined-extension-runtime --tag warmup
    ```
-2. **Проверить, что тесты зелёные.** Число тестов зависит от того, какие каталоги перечислены в
-   команде, поэтому цифру всегда называть вместе с командой. Именно эти две дают **645 pass /
-   0 fail** и **65 pass / 1 skip**:
+2. **Прогнать тесты и знать, чего ждать.** Число тестов зависит от того, какие каталоги
+   перечислены в команде, поэтому цифру всегда называть вместе с командой. На Linux эти две дают
+   **754 pass / 1 fail** из 755 и **51 pass / 15 skip / 0 fail**:
    ```bash
-   cd packages/opencode && bun test ./test/kilocode/security/ ./test/tool/registry.test.ts --timeout 120000
+   cd packages/opencode && bun test ./test/kilocode/security/ ./test/tool/registry.test.ts \
+     ./src/kilocode/security/classifier/ --timeout 120000
    cd packages/kilo-sandbox && bun test
    ```
-   Юнит-тесты семантического слоя лежат рядом с исходниками, а не в `test/`, поэтому в этот счёт
-   они не попадают: чтобы прогнать и их, добавьте в первую команду `src/kilocode/security`.
-3. **Проверить платформу.** Read-Confinement верифицирован на macOS (Seatbelt). На Linux он
-   реализован через bubblewrap, но здесь не верифицирован; на платформе без backend'а одобренное
-   расширение не запускается вовсе. Demo D показывать с той машины, где прогон был проверен.
+   Одно падение на Linux — ожидаемое: тест границы чтения расширения требует, чтобы домашний
+   каталог был неперечислим, а песочница обязана протянуть цепочку каталогов до чекаута и
+   интерпретатора, когда те лежат внутри `$HOME`. Содержимое домашнего каталога при этом закрыто.
+   Пятнадцать пропусков — тесты профиля `seatbelt`, на Linux они не выполняются по построению.
+   Разбор и числа macOS — в SOURCE_OF_TRUTH, раздел 10.
+3. **Проверить платформу.** Read-Confinement верифицирован на macOS (Seatbelt) и на Linux
+   (bubblewrap); на платформе без backend'а одобренное расширение не запускается вовсе. На Linux
+   расширение видит имена каталогов на пути привязок внутри `$HOME`, содержимое закрыто.
+   Demo D показывать с той машины, где прогон был проверен.
 4. **Открыть два окна.** Слева терминал с `cd packages/opencode`, справа — заранее открытый
    `submission/evidence/benchmark-summary.md`: полный отчёт каноничного прогона, вендоренный
    в сам пакет (fallback).
