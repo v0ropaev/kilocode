@@ -33,6 +33,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { SecurityGate } from "@/kilocode/security/gate"
 import { SecurityKeys } from "@/kilocode/security/keys"
 import { ToolOrigin } from "@/kilocode/security/tool/origin"
+import * as ToolNetwork from "@/kilocode/sandbox/network"
 import type { SecurityDeniedError } from "@/kilocode/security/error"
 import { SecuritySessionState } from "@/kilocode/security/state/store" // kilocode_change
 import { KiloSession } from "@/kilocode/session" // kilocode_change
@@ -150,10 +151,12 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
    * that ends the turn.
    *
    * `SecurityGate.delegate` is that lifecycle, unchanged and shared with the MCP tool path below. The
-   * built-in `SecurityGate.execute` envelope cannot stand in for it: it would add a second permission
-   * ask on top of the one these tools already make, and its ingest attribution reads the *tool's*
-   * provenance, which for a Kilo built-in is `builtin` — so the resource text would still never be
-   * recorded. Nothing here widens a permission: the ask, its patterns and its metadata are untouched.
+   * built-in `SecurityGate.execute` envelope cannot stand in for it, and for one reason rather than
+   * two: its ingest attribution reads the *tool's* provenance, which for a Kilo built-in is
+   * `builtin`, so the resource text would still never be recorded. (It would *not* add a second
+   * permission ask — all three are in `ToolCapability.ASKING`, and `execute` skips the envelope for
+   * those. That reason was stated here and was wrong.) Nothing here widens a permission: the ask,
+   * its patterns and its metadata are untouched.
    */
   const resourceCall = <A extends { output: string }, E, R>(
     ctx: Tool.Context,
@@ -186,10 +189,18 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
    */
   const resourceProvenance = (invocation: SecurityGate.Request["security"], servers: string[]) => {
     if (!invocation) return undefined
-    const remote = servers.some((name) => {
+    // The live tool entry is the authority: `MCP.tools()` stamps the remote marker the delegated
+    // path already judges by, and it covers servers registered at runtime, which the configuration
+    // snapshot does not. The configuration is the fallback for a server that publishes resources but
+    // no tools, where there is no entry to read; a runtime-added server of that shape is the one
+    // remaining case that reads as local. The field is an audit label, never an input to a decision.
+    const marked = (name: string) =>
+      Object.entries(mcpTools).some(([key, entry]) => key.startsWith(`${name}_`) && ToolNetwork.isRemoteMcp(entry))
+    const configured = (name: string) => {
       const entry = cfg.mcp?.[name]
       return entry !== undefined && "type" in entry && entry.type === "remote"
-    })
+    }
+    const remote = servers.some((name) => marked(name) || configured(name))
     return SecurityGate.resultProvenance({ provenance: remote ? "mcp-remote" : "mcp-local" })
   }
   // kilocode_change end

@@ -662,10 +662,10 @@ def build(prs):
     y = title(s, "Работает, измерено, дальше — пилот", size=28, w=8.958)
     y = pairs(s, [
         ("Сделано", "встроено в Kilo · пакеты · смысловой слой · процесс ОС"),
-        ("Проверено", "5760 прогонов · настоящая модель · 755 тестов"),
+        ("Проверено", "5760 прогонов · модель · 757 тестов"),
         ("Дальше", "пилот · два недостающих правила · трение на людях"),
-    ], y=y + 0.22, labelw=2.10, size=20, gap=0.14)
-    r = rect(s, M, y + 0.16, 8.958, 1.30, fill=BLUE)
+    ], y=y + 0.20, labelw=2.10, size=20, gap=0.12)
+    r = rect(s, M, y + 0.14, 8.958, 1.30, fill=BLUE)
     tf = r.text_frame
     tf.margin_left = tf.margin_right = Inches(0.26)
     para(tf, "Security Auto Mode снижает успешность атак со ста процентов до пяти, сохраняя "
@@ -691,20 +691,19 @@ def build(prs):
          "Расширение корпуса атак, два канала egress в разборе curl, первый прототип слоя на модели",
          "8 коммитов из 95 в ветке", "поддержка"],
         ["Дмитрий Комаров", "Разработка,\nAI Product",
-         "Постановка задачи и приёмка, переносимость на Linux, MCP-ресурсы в смысловом контексте, "
-         "пайплайн записей интерфейса",
+         "Постановка задачи и приёмка, переносимость на Linux, MCP-ресурсы, пайплайн записей",
          "10 коммитов из 95 в ветке", "поддержка"],
     ]
     yy = hy + 0.42
     for row in rows:
-        rh = max(measure(c, 10, ARIAL, False, w, 1.2) for c, w in zip(row, ws))
+        rh = max(measure(c, 9.5, ARIAL, False, w, 1.2) for c, w in zip(row, ws))
         for x, w, cell in zip(xs, ws, row):
-            text(s, x, yy, w, rh, cell, size=10, color=WHITE, font=ARIAL, line=1.2, space=0)
-        yy += rh + 0.26
-        hline(s, M, yy - 0.13, 8.958, WHITE, 0.4)
-    text(s, M, yy + 0.06, 8.958, 0.44,
+            text(s, x, yy, w, rh, cell, size=9.5, color=WHITE, font=ARIAL, line=1.2, space=0)
+        yy += rh + 0.18
+        hline(s, M, yy - 0.09, 8.958, WHITE, 0.4)
+    text(s, M, min(yy + 0.02, 4.66), 8.958, 0.22,
          "Все строки выведены из истории репозитория: `git shortlog -sn` против точки ветвления.",
-         size=10, color=WHITE, font=ARIAL, line=1.2, space=0)
+         size=9.5, color=WHITE, font=ARIAL, line=1.2, space=0)
     footer_logos(s, blue=True)
 
     # =============================================================== APPENDIX
@@ -983,7 +982,7 @@ def build(prs):
          "Что смотрим: доля успешных атак, доля доведённых задач, ошибочные запреты, вопросы на "
          "задачу, задержка и сколько человек через две недели оставили режим включённым.\n"
          "Отложенный набор израсходован; новый пишет внешний автор, а конфигурация уже запечатана."),
-    ], y=y + 0.18, xs=COL3_X, w=COL3_W, body_h=1.56, size=10.5)
+    ], y=y + 0.14, xs=COL3_X, w=COL3_W, body_h=1.50, size=10)
     hline(s, M, y + 0.06, 8.958, GRAY, 0.75)
     text(s, M, y + 0.10, 8.958, 0.44,
          "Повторить любую цифру:  bun run script/security-bench.ts --runs 3\n"

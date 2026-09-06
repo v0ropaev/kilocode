@@ -104,7 +104,24 @@ MCP tool call
                  └─ ctx.ask(<server>_<tool>)   carries the MCP identity + capabilities
                       └─ KiloSessionPrompt.askPermission → SecurityGate → Permission.ask
                  └─ client.callTool(...)       the remote call, only if the ask succeeded
+
+MCP resource tools (list_mcp_resources, list_mcp_resource_templates, read_mcp_resource)
+  └─ SessionTools.resolve                     packages/opencode/src/session/tools.ts
+       └─ SecurityGate.delegate                the same lifecycle as a delegated MCP call
+            ├─ ctx.ask(read)                   the tool's own ask — no second permission request
+            ├─ mcp.resources / readResource    the server's own words
+            └─ settle                          recorded as untrusted context; a denial becomes a
+                                               structured result, not a defect
 ```
+
+The three MCP resource tools are Kilo built-ins, but the text they hand the agent is written outside
+Kilo, so they run through the delegated lifecycle rather than the built-in envelope: the envelope's
+ingest attribution reads the *tool's* provenance, which for a built-in is `builtin`, and the resource
+text would never be recorded. What they gain is the settle step — where the classifier layer is on,
+the words a resource returned become part of the untrusted context the *next* side-effecting action
+is judged against — and the conversion of a denial into a readable result. The provenance label
+follows the origin of the content (`mcp-untrusted` / `remote-untrusted`), not the tool that fetched
+it. The ask itself, its patterns and its metadata are unchanged.
 
 The shell tool additionally parses the command with Tree-sitter (`ShellPermission.check`) and asks
 `external_directory` / `bash` / `sandbox_escalation`. The security normaliser reuses that parser and
@@ -280,10 +297,13 @@ tools, plugin tools and workspace (`.kilocode/tool/*.ts`) tools.
   be. Composition with the session state: an outbound call while the session holds credential
   material is a hard ASK; a call that carries a value read from a credential this session, or uploads a
   file that received one, is a DENY.
-- **Tool-result provenance** (foundation only): results from outside Kilo carry a
-  `securityProvenance` marker (`mcp-untrusted`, `remote-untrusted`, `workspace-untrusted`,
-  `plugin-untrusted`, `config-untrusted`) in their metadata. Nothing reads it as policy today, no
-  content is inspected or rewritten; it exists for audit and for a future classifier.
+- **Tool-result provenance**: results from outside Kilo carry a `securityProvenance` marker
+  (`mcp-untrusted`, `remote-untrusted`, `workspace-untrusted`, `plugin-untrusted`,
+  `config-untrusted`) in their metadata, and the three MCP resource tools carry the marker of the
+  server whose words they returned rather than of the built-in that fetched them. The marker is an
+  audit label: no decision reads it, and no content is rewritten. What the text itself feeds is the
+  session's untrusted context for the semantic layer (`docs/security-auto-mode-llm-layers.md`),
+  which can only add a question to a decision, never relax one.
 - Honest guarantee: *a tool with unknown or non-delegatable authority cannot run unattended, and what
   it says about itself cannot lower that bar.* It does not make a tool the user vouched for safe, does
   not analyse what a declared `process` tool executes, and does not govern code that runs at module
@@ -436,12 +456,16 @@ denied. An extension host therefore does not inherit the user's read authority.
   the ordinary read policy applies, the content classifier sees what came back, and the session's
   secret state is updated. Ambient authority is constrained; intentional privileged authority is
   mediated. There is no second permission system.
-- **Per platform, exactly what is enforceable.** macOS Seatbelt: enforced and verified on this
-  machine. Linux Bubblewrap: the root is a tmpfs and only allowed paths are bound in, so an unbound
-  path does not exist for the process — implemented, but not verified here. Windows and any platform
-  without a backend: **not enforceable**, and there an approved workspace extension does not run at
-  all unless the user sets `experimental.security_auto_extension_unconfined_reads`. The mode off
-  restores the previous loading behaviour exactly.
+- **Per platform, exactly what is enforceable.** macOS Seatbelt: enforced and verified by probes
+  inside a real host. Linux Bubblewrap: the root is a tmpfs and only allowed paths are bound in, so
+  an unbound path does not exist for the process — enforced and verified by the same probes, with
+  one caveat that travels with the claim: when the checkout or the interpreter live inside `$HOME`,
+  the sandbox has to bind a chain of directories to reach them, so the host can enumerate those
+  directory *names*. Contents stay closed — `~/.ssh`, `~/.config/kilo/*`, a workspace `.env` and
+  symlink escapes are all refused there too. Windows and any platform without a backend: **not
+  enforceable**, and there an approved workspace extension does not run at all unless the user sets
+  `experimental.security_auto_extension_unconfined_reads`. The mode off restores the previous
+  loading behaviour exactly.
 - Residual, measured rather than hidden: path resolution needs metadata everywhere, so a confined host
   can still learn that a file exists and how large it is (`atk-extread-metadata-probe`). Its contents
   stay unreadable.
@@ -557,16 +581,20 @@ approving content approves those exact bytes anywhere, so a rename keeps working
 in another repository is also approved; an unreadable or over-large candidate is refused rather than
 assumed safe.
 
-The extension read boundary was reviewed by attempting every read path a JavaScript runtime offers,
+The extension read boundary was reviewed on both backends — macOS Seatbelt and Linux bubblewrap — by
+attempting every read path a JavaScript runtime offers,
 inside a real host, against a canary outside the allowed set: `fs.readFileSync`, `fs/promises`,
 `openSync`/`readSync`, `Bun.file`, `createReadStream`, `fetch("file://…")`, a dynamic `import()` of a
 JSON file outside the tree, a `Worker`, a workspace symlink, `readdir` of the home directory and of the
-enclosing directory, `Bun.spawnSync(["/bin/cat", …])` and `Bun.$`. All are refused by the operating
-system (`EPERM`), the error text carries no file content, and the same probe with confinement off
-leaks through every one of them — which is what makes the result evidence rather than an assertion.
-Two properties are deliberate rather than defects: file *metadata* stays visible everywhere, because
-path resolution needs it and a runtime that cannot resolve a path cannot start; and the workspace
-stays readable, because it is the extension's own working set.
+enclosing directory, `Bun.spawnSync(["/bin/cat", …])` and `Bun.$`. Every read of content is refused by
+the operating system (`EPERM`), the error text carries no file content, and the same probe with
+confinement off leaks through every one of them — which is what makes the result evidence rather than
+an assertion. Three properties are deliberate rather than defects: file *metadata* stays visible
+everywhere, because path resolution needs it and a runtime that cannot resolve a path cannot start;
+the workspace stays readable, because it is the extension's own working set; and on Linux, where the
+checkout or the interpreter live inside `$HOME`, the directories bound to reach them are enumerable
+by name — which is why `readdir` of the home directory is the one probe that answers differently on
+the two backends, while every read of content there is refused on both.
 
 ## Reproducible examples
 
@@ -610,9 +638,11 @@ Real gaps that do not invalidate the architecture. They are measured where a sce
 - (extension runtime) File **metadata** stays readable everywhere inside a confined host — existence,
   size, mtime — because path resolution needs it; contents do not. The **workspace itself stays
   readable**, deliberately: it is the extension's working set, and the extension is repository content
-  in the first place. Read confinement is enforced on macOS (verified) and implemented for Linux
-  (not verified here); on a platform with no sandbox backend an approved extension does not run at
-  all unless the user opts in. Hooks of a hosted plugin cannot mutate hook payloads any more, which is
+  in the first place. Read confinement is enforced and verified on macOS (Seatbelt) and on Linux
+  (bubblewrap); on Linux the directories bound to reach a checkout or an interpreter inside `$HOME`
+  are enumerable by name, and nothing beyond their names is — `~/.ssh`, Kilo's own configuration, a
+  workspace `.env` and symlink escapes are refused there as they are on macOS. On a platform with no
+  sandbox backend an approved extension does not run at all unless the user opts in. Hooks of a hosted plugin cannot mutate hook payloads any more, which is
   a compatibility change for plugins that transformed tool arguments. Global and user-scope plugins
   are unchanged: they load in the main process as before, because the user, not the repository, chose
   them.
@@ -671,8 +701,9 @@ Important for a production rollout, outside the scope of the layers above.
   answer a pending hard ASK by asserting `interactive: true` on the reply payload; nothing verifies
   that assertion. It needs a server-issued token, not a boolean.
 - **A durable session-ancestry query**, so secret context follows a child session across a restart.
-- **Read confinement verified on Linux**, with the same probe suite that verifies it on macOS, plus a
-  decision on what to do where no backend exists beyond the current fail-safe.
+- **A decision on what to do where no sandbox backend exists**, beyond the current fail-safe of
+  refusing to run the extension. (Read confinement itself is no longer open work: the probe suite
+  that verifies it on macOS now verifies it on Linux too.)
 - **Package ecosystems beyond the npm family** (pip, cargo, go, system managers), which today keep the
   base handling.
 - **A stochastic, model-driven benchmark driver** alongside the scripted one, to measure how often a

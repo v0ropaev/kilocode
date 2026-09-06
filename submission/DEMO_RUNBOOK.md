@@ -252,18 +252,25 @@ cd packages/opencode && bun run script/security-bench.ts --runs 1 --scenario <id
      --configs baseline,read-confined-extension-runtime --tag warmup
    ```
 2. **Прогнать тесты и знать, чего ждать.** Число тестов зависит от того, какие каталоги
-   перечислены в команде, поэтому цифру всегда называть вместе с командой. На Linux эти две дают
-   **754 pass / 1 fail** из 755 и **51 pass / 15 skip / 0 fail**:
+   перечислены в команде, поэтому цифру всегда называть вместе с командой. Блок выполняется целиком,
+   из любого каталога внутри репозитория — второй `cd` относителен первому, а не тому, где вы стояли:
    ```bash
-   cd packages/opencode && bun test ./test/kilocode/security/ ./test/tool/registry.test.ts \
-     ./src/kilocode/security/classifier/ --timeout 120000
-   cd packages/kilo-sandbox && bun test
+   cd "$(git rev-parse --show-toplevel)/packages/opencode" && bun test ./test/kilocode/security/ \
+     ./test/tool/registry.test.ts ./src/kilocode/security/classifier/ --timeout 120000
+   cd ../kilo-sandbox && bun test
    ```
-   Одно падение на Linux — ожидаемое: тест границы чтения расширения требует, чтобы домашний
-   каталог был неперечислим, а песочница обязана протянуть цепочку каталогов до чекаута и
-   интерпретатора, когда те лежат внутри `$HOME`. Содержимое домашнего каталога при этом закрыто.
-   Пятнадцать пропусков — тесты профиля `seatbelt`, на Linux они не выполняются по построению.
-   Разбор и числа macOS — в SOURCE_OF_TRUTH, раздел 10.
+   Чего ждать — зависит от платформы, и цифру надо называть вместе с ней:
+
+   | Платформа | opencode security (22 файла) | kilo-sandbox |
+   |---|---|---|
+   | macOS | **757 pass / 0 fail**, 3540 expect() | **65 pass / 1 skip / 0 fail**, 351 expect() |
+   | Linux | **754 pass / 1 fail** из 755 на коммите автора PR | **51 pass / 15 skip / 0 fail** |
+
+   На macOS набор зелёный целиком. Одно падение на Linux — ожидаемое: тест границы чтения
+   расширения требует, чтобы домашний каталог был неперечислим, а песочница обязана протянуть
+   цепочку каталогов до чекаута и интерпретатора, когда те лежат внутри `$HOME`. Содержимое
+   домашнего каталога при этом закрыто. Пятнадцать пропусков — тесты профиля `seatbelt`, на Linux
+   они не выполняются по построению. Разбор — в SOURCE_OF_TRUTH, раздел 10.
 3. **Проверить платформу.** Read-Confinement верифицирован на macOS (Seatbelt) и на Linux
    (bubblewrap); на платформе без backend'а одобренное расширение не запускается вовсе. На Linux
    расширение видит имена каталогов на пути привязок внутри `$HOME`, содержимое закрыто.

@@ -130,12 +130,19 @@ describe("PathRisk classification", () => {
 
   // The fixture reclassifies its own roots; production must not follow it. A default environment
   // still treats the OS temp dirs as temp, so moving the fixture did not relax real policy.
+  //
+  // The root itself is deliberately *not* temp: emptying a whole temp root is not a temp operation,
+  // so a declared root classifies as external while everything under it is temp. `os.tmpdir()`
+  // cannot stand in for that check, because it is only a declared root on some systems — on Linux
+  // it is `/tmp`, which is one; on macOS it is a per-user directory *inside* `/var/folders`, which
+  // is the declared root, so it classifies as temp and correctly so. The roots below are named in
+  // the defaults on both.
   test("production defaults still treat the OS temp roots as temp", () => {
     const production = PathRisk.env({ workspace: { directory: ws, worktree: ws } })
     const classify = (input: string) => PathRisk.classify(input, ws, production).relation
     expect(classify(path.join(os.tmpdir(), "scratch", "x"))).toBe("temp")
-    expect(classify(os.tmpdir())).toBe("external")
     expect(classify("/tmp/scratch/x")).toBe("temp")
     expect(classify("/tmp")).toBe("external")
+    expect(classify("/var/tmp")).toBe("external")
   })
 })
